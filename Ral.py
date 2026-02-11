@@ -342,15 +342,23 @@ if st.session_state.pdf_uploaded:
     with st.expander("⚙️ Table Detection Settings"):
         col1, col2 = st.columns(2)
         with col1:
-            min_rows = st.number_input("Minimum rows per table", 1000, 100000, 1000)
-            min_cols = st.number_input("Minimum columns per table", 2, 50, 3)
+            min_rows = st.number_input(
+                "Minimum rows per table", 
+                1, 1000000, 1,  # Changed: from 1 to 1,000,000, default 1
+                help="Minimum number of rows a table must have to be extracted"
+            )
+            min_cols = st.number_input(
+                "Minimum columns per table", 
+                2, 50, 3,
+                help="Minimum number of columns a table must have to be extracted"
+            )
         with col2:
             extract_text_tables = st.checkbox("Extract text-based tables", value=True)
             merge_small_tables = st.checkbox("Merge adjacent small tables", value=True)
     
     # Extract button
     if selected_pages and st.button("🔍 Scan for Tables", type="primary", use_container_width=True):
-        with st.spinner(f"Scanning {len(selected_pages)} pages for large tables..."):
+        with st.spinner(f"Scanning {len(selected_pages)} pages for tables..."):
             # Save PDF temporarily
             with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
                 tmp.write(uploaded_file.getvalue())
@@ -360,9 +368,10 @@ if st.session_state.pdf_uploaded:
                 # Extract tables
                 tables_by_page = extract_tables_with_pdfplumber(pdf_path, selected_pages)
                 
-                # Filter tables based on criteria (minimum 1000 rows)
+                # Filter tables based on criteria (flexible minimum rows)
                 filtered_tables = {}
                 total_tables_found = 0
+                small_tables_ignored = 0
                 
                 for page_num, tables in tables_by_page.items():
                     filtered_page_tables = []
@@ -370,6 +379,8 @@ if st.session_state.pdf_uploaded:
                         if len(table) >= min_rows and len(table.columns) >= min_cols:
                             filtered_page_tables.append(table)
                             total_tables_found += 1
+                        else:
+                            small_tables_ignored += 1
                     
                     if filtered_page_tables:
                         filtered_tables[page_num] = filtered_page_tables
@@ -415,7 +426,15 @@ if st.session_state.pdf_uploaded:
                         table_counter += 1
                 
                 if total_tables_found > 0:
-                    st.success(f"✅ Found {total_tables_found} large tables (≥{min_rows} rows) across {len(filtered_tables)} pages")
+                    if min_rows == 1:
+                        st.success(f"✅ Found {total_tables_found} tables across {len(filtered_tables)} pages")
+                    elif min_rows <= 10:
+                        st.success(f"✅ Found {total_tables_found} tables (≥{min_rows} rows) across {len(filtered_tables)} pages")
+                    else:
+                        st.success(f"✅ Found {total_tables_found} large tables (≥{min_rows} rows) across {len(filtered_tables)} pages")
+                    
+                    if small_tables_ignored > 0:
+                        st.info(f"ℹ️ Ignored {small_tables_ignored} tables with less than {min_rows} rows")
                 else:
                     st.warning(f"⚠️ No tables found with {min_rows}+ rows. Try reducing the minimum rows or select more pages.")
                 
@@ -438,7 +457,7 @@ if st.session_state.tables_data:
     
     col1, col2 = st.columns(2)
     with col1:
-        st.metric("Large Tables Found", total_tables)
+        st.metric("Tables Found", total_tables)
     with col2:
         st.metric("Selected for Export", selected_tables)
     
@@ -452,7 +471,7 @@ if st.session_state.tables_data:
         for tab_idx, (page_num, tab) in enumerate(zip(pages_with_tables, tabs)):
             with tab:
                 tables_on_page = st.session_state.tables_data[page_num]
-                st.subheader(f"📄 Page {page_num} - {len(tables_on_page)} large table(s)")
+                st.subheader(f"📄 Page {page_num} - {len(tables_on_page)} table(s)")
                 
                 for table_idx, table in enumerate(tables_on_page):
                     # Find table ID
@@ -464,6 +483,7 @@ if st.session_state.tables_data:
                     
                     if table_id:
                         # Table header
+                        row_label = "rows" if min_rows == 1 else f"rows (≥{min_rows})"
                         st.markdown(f"### Table {table_idx + 1} ({len(table)} rows × {len(table.columns)} columns)")
                         
                         # Table selection
@@ -792,7 +812,7 @@ if st.session_state.tables_data:
                     <p><strong>File:</strong> {excel_name}</p>
                     <p><strong>Tables exported:</strong> {len(tables_to_export)}</p>
                     <p><strong>Total rows exported:</strong> {total_rows:,}</p>
-                    <p><strong>Average rows per table:</strong> {total_rows//len(tables_to_export):,}</p>
+                    <p><strong>Average rows per table:</strong> {total_rows//len(tables_to_export):, if len(tables_to_export) > 0 else 0}</p>
                     </div>
                     """, unsafe_allow_html=True)
                     
@@ -823,8 +843,8 @@ else:
     st.markdown("""
     <div class="info-box">
     <h3>📊 PDF Table Extractor</h3>
-    <p>Extract large tabular data from PDF files <strong>without Java dependency</strong>.</p>
-    <p>This tool specializes in extracting large tables (1000+ rows) with customizable column selection.</p>
+    <p>Extract tabular data from PDF files <strong>without Java dependency</strong>.</p>
+    <p>This tool allows you to extract tables of any size with customizable column selection.</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -835,7 +855,7 @@ else:
     with col1:
         st.markdown("### ✅ **Key Features**")
         st.markdown("""
-        - **Large table focus** (1000+ rows minimum)
+        - **Flexible table size** (1 row to 1,000,000+ rows)
         - **Smart column detection** (Debit, Credit, etc.)
         - **Column-by-column selection**
         - **Row range selection**
@@ -844,22 +864,21 @@ else:
         """)
     
     with col2:
-        st.markdown("### 📋 **For Large Datasets**")
+        st.markdown("### 📋 **Table Size Options**")
         st.markdown("""
-        - Optimized for 1000+ row tables
-        - Select specific columns only
-        - Choose row ranges
-        - Smart column renaming
-        - Data cleaning options
-        - Efficient memory usage
+        - Extract small tables (1+ rows)
+        - Extract medium tables (10+ rows)
+        - Extract large tables (1000+ rows)
+        - Extract very large tables (10000+ rows)
+        - Customize minimum rows as needed
         """)
     
     st.markdown("---")
-    st.markdown("*Upload a PDF file with large tables using the sidebar to begin*")
+    st.markdown("*Upload a PDF file using the sidebar to begin*")
 
 # Footer
 st.markdown("---")
 st.markdown(
-    "<div style='text-align: center; color: gray;'>PDF Table Extractor • Large Dataset Specialist • Built with Streamlit</div>",
+    "<div style='text-align: center; color: gray;'>PDF Table Extractor • Flexible Table Size • Built with Streamlit</div>",
     unsafe_allow_html=True
 )
