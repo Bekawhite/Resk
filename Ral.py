@@ -806,13 +806,16 @@ if st.session_state.tables_data:
                         excel_data = f.read()
                     
                     # Success message
+                    # Calculate average rows
+                    avg_rows = total_rows // len(tables_to_export) if tables_to_export else 0
+                    
                     st.markdown(f"""
                     <div class="success-box">
                     <h3>✅ Excel File Created Successfully!</h3>
                     <p><strong>File:</strong> {excel_name}</p>
                     <p><strong>Tables exported:</strong> {len(tables_to_export)}</p>
                     <p><strong>Total rows exported:</strong> {total_rows:,}</p>
-                    <p><strong>Average rows per table:</strong> {total_rows//len(tables_to_export):, if len(tables_to_export) > 0 else 0}</p>
+                    <p><strong>Average rows per table:</strong> {avg_rows:,}</p>
                     </div>
                     """, unsafe_allow_html=True)
                     
