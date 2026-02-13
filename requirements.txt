@@ -9,3 +9,7 @@ camelot-py
 tabula-py
 Pillow
 xlrd
+
+
+
+XlsxWriter
