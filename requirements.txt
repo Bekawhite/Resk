@@ -9,7 +9,17 @@ camelot-py
 tabula-py
 Pillow
 xlrd
-
-
-
 XlsxWriter
+
+
+camelot-py[cv]
+
+opencv-python0
+pytesseract
+pillow
+pdf2image
+# Data processing
+python-dateutil
+
+# Utilities
+typing-extensions
