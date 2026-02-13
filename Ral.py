@@ -6,6 +6,7 @@ import os
 import re
 from typing import List, Dict, Tuple
 import numpy as np
+from datetime import datetime
 
 st.set_page_config(
     page_title="PDF Table Extractor",
@@ -80,6 +81,56 @@ if 'row_selections' not in st.session_state:
     st.session_state.row_selections = {}
 if 'all_columns' not in st.session_state:
     st.session_state.all_columns = {}
+
+def convert_to_proper_types(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert DataFrame columns to proper data types for Excel compatibility"""
+    df_converted = df.copy()
+    
+    for col in df_converted.columns:
+        # Skip if column is empty
+        if df_converted[col].isna().all():
+            continue
+            
+        # Try to convert to numeric
+        try:
+            # First, clean the data: remove currency symbols and commas
+            if df_converted[col].dtype == 'object':
+                # Check if column contains currency patterns
+                sample = df_converted[col].dropna().iloc[0] if not df_converted[col].dropna().empty else ""
+                if isinstance(sample, str):
+                    if any(symbol in sample for symbol in ['$', '€', '£', '¥', '₹', ',']):
+                        # Remove currency symbols and commas, then try numeric conversion
+                        cleaned = df_converted[col].astype(str).str.replace(r'[$,€£¥₹]', '', regex=True)
+                        cleaned = cleaned.str.replace(',', '')
+                        numeric_col = pd.to_numeric(cleaned, errors='coerce')
+                        if not numeric_col.isna().all():
+                            df_converted[col] = numeric_col
+                            continue
+            
+            # Direct numeric conversion
+            numeric_col = pd.to_numeric(df_converted[col], errors='coerce')
+            if not numeric_col.isna().all():  # If at least some values converted successfully
+                df_converted[col] = numeric_col
+                continue
+        except:
+            pass
+        
+        # Try to convert to datetime
+        try:
+            if df_converted[col].dtype == 'object':
+                # Common date formats
+                date_col = pd.to_datetime(df_converted[col], errors='coerce', infer_datetime_format=True)
+                if not date_col.isna().all():  # If at least some dates converted successfully
+                    df_converted[col] = date_col
+                    continue
+        except:
+            pass
+        
+        # If all else fails, ensure it's string type for Excel compatibility
+        if df_converted[col].dtype == 'object':
+            df_converted[col] = df_converted[col].astype(str)
+    
+    return df_converted
 
 def is_table_like(data: List[List[str]]) -> bool:
     """Check if data looks like a table"""
@@ -344,7 +395,7 @@ if st.session_state.pdf_uploaded:
         with col1:
             min_rows = st.number_input(
                 "Minimum rows per table", 
-                1, 1000000, 1,  # Changed: from 1 to 1,000,000, default 1
+                1, 1000000, 1,
                 help="Minimum number of rows a table must have to be extracted"
             )
             min_cols = st.number_input(
@@ -355,6 +406,21 @@ if st.session_state.pdf_uploaded:
         with col2:
             extract_text_tables = st.checkbox("Extract text-based tables", value=True)
             merge_small_tables = st.checkbox("Merge adjacent small tables", value=True)
+    
+    # Excel Formatting Options (NEW)
+    with st.expander("📊 Excel Data Type Options", expanded=False):
+        st.markdown("**Data Type Conversion for Excel Compatibility:**")
+        col1, col2 = st.columns(2)
+        with col1:
+            convert_numbers = st.checkbox("Convert to numbers (for SUM, AVG, etc.)", value=True,
+                                         help="Convert currency and number strings to actual numbers")
+            convert_dates = st.checkbox("Convert to dates (for date functions)", value=True,
+                                       help="Convert date strings to Excel date format")
+        with col2:
+            preserve_text = st.checkbox("Preserve text formatting", value=True,
+                                       help="Keep text as-is without conversion")
+            auto_detect = st.checkbox("Auto-detect data types", value=True,
+                                     help="Automatically detect and convert appropriate data types")
     
     # Extract button
     if selected_pages and st.button("🔍 Scan for Tables", type="primary", use_container_width=True):
@@ -630,7 +696,7 @@ if st.session_state.tables_data:
     
     with col2:
         include_metadata = st.checkbox("Include metadata sheet", value=True)
-        auto_format = st.checkbox("Auto-format columns", value=True)
+        auto_format = st.checkbox("Auto-format columns width", value=True)
         
         # Data cleaning options
         st.markdown("**Data Cleaning:**")
@@ -688,6 +754,10 @@ if st.session_state.tables_data:
                                     new_columns.append(col)
                             filtered_df.columns = new_columns
                         
+                        # Convert to proper data types for Excel (NEW)
+                        if convert_numbers or convert_dates or auto_detect:
+                            filtered_df = convert_to_proper_types(filtered_df)
+                        
                         if not filtered_df.empty:
                             tables_to_export.append({
                                 "df": filtered_df,
@@ -724,7 +794,8 @@ if st.session_state.tables_data:
                             metadata_df = pd.DataFrame({
                                 'Property': [
                                     'File Name', 'Total Pages', 'Tables Exported', 
-                                    'Total Rows Exported', 'Export Date', 'Export Settings'
+                                    'Total Rows Exported', 'Export Date', 'Export Settings',
+                                    'Number Conversion', 'Date Conversion'
                                 ],
                                 'Value': [
                                     st.session_state.pdf_metadata['file_name'],
@@ -732,7 +803,9 @@ if st.session_state.tables_data:
                                     len(tables_to_export),
                                     total_rows,
                                     pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'),
-                                    f"Smart Names: {rename_columns}, Cleaned: {remove_duplicates}|{remove_empty}"
+                                    f"Smart Names: {rename_columns}, Cleaned: {remove_duplicates}|{remove_empty}",
+                                    'Yes' if convert_numbers else 'No',
+                                    'Yes' if convert_dates else 'No'
                                 ]
                             })
                             metadata_df.to_excel(writer, sheet_name='Metadata', index=False)
@@ -786,19 +859,40 @@ if st.session_state.tables_data:
                         
                         # Auto-format if enabled
                         if auto_format:
+                            from openpyxl.utils import get_column_letter
+                            from openpyxl.styles import numbers
+                            
                             for sheet_name in writer.sheets:
                                 worksheet = writer.sheets[sheet_name]
+                                
+                                # Auto-fit columns
                                 for column in worksheet.columns:
                                     max_length = 0
-                                    column_letter = column[0].column_letter
+                                    column_letter = get_column_letter(column[0].column)
+                                    
                                     for cell in column:
                                         try:
-                                            cell_value = str(cell.value) if cell.value is not None else ""
-                                            if len(cell_value) > max_length:
-                                                max_length = len(cell_value)
+                                            if cell.value:
+                                                # Check if it's a date
+                                                if isinstance(cell.value, (datetime, pd.Timestamp)):
+                                                    cell.number_format = 'yyyy-mm-dd'  # Date format
+                                                    cell_value = str(cell.value)
+                                                # Check if it's a number
+                                                elif isinstance(cell.value, (int, float)):
+                                                    if isinstance(cell.value, float):
+                                                        cell.number_format = '#,##0.00'  # Number format with 2 decimals
+                                                    else:
+                                                        cell.number_format = '#,##0'  # Number format
+                                                    cell_value = str(cell.value)
+                                                else:
+                                                    cell_value = str(cell.value)
+                                                
+                                                if len(cell_value) > max_length:
+                                                    max_length = len(cell_value)
                                         except:
                                             pass
-                                    adjusted_width = min(max_length + 2, 100)  # Increased max width
+                                    
+                                    adjusted_width = min(max_length + 2, 50)
                                     worksheet.column_dimensions[column_letter].width = adjusted_width
                     
                     # Read the Excel file
@@ -816,6 +910,7 @@ if st.session_state.tables_data:
                     <p><strong>Tables exported:</strong> {len(tables_to_export)}</p>
                     <p><strong>Total rows exported:</strong> {total_rows:,}</p>
                     <p><strong>Average rows per table:</strong> {avg_rows:,}</p>
+                    <p><strong>Data Types:</strong> Numbers and dates are properly formatted for Excel functions</p>
                     </div>
                     """, unsafe_allow_html=True)
                     
@@ -848,6 +943,7 @@ else:
     <h3>📊 PDF Table Extractor</h3>
     <p>Extract tabular data from PDF files <strong>without Java dependency</strong>.</p>
     <p>This tool allows you to extract tables of any size with customizable column selection.</p>
+    <p><strong>Excel Compatibility:</strong> Numbers and dates are properly formatted for Excel functions like SUM, AVERAGE, date calculations, etc.</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -867,13 +963,13 @@ else:
         """)
     
     with col2:
-        st.markdown("### 📋 **Table Size Options**")
+        st.markdown("### 📊 **Excel Compatibility**")
         st.markdown("""
-        - Extract small tables (1+ rows)
-        - Extract medium tables (10+ rows)
-        - Extract large tables (1000+ rows)
-        - Extract very large tables (10000+ rows)
-        - Customize minimum rows as needed
+        - **Numbers** - Use SUM, AVERAGE, COUNT
+        - **Dates** - Use date functions, sorting
+        - **Currency** - Perform calculations
+        - **Auto-formatting** - Proper column widths
+        - **No text conversion** - Real Excel data types
         """)
     
     st.markdown("---")
@@ -882,6 +978,6 @@ else:
 # Footer
 st.markdown("---")
 st.markdown(
-    "<div style='text-align: center; color: gray;'>PDF Table Extractor • Flexible Table Size • Built with Streamlit</div>",
+    "<div style='text-align: center; color: gray;'>PDF Table Extractor • Excel Compatible Data Types • Built with Streamlit</div>",
     unsafe_allow_html=True
 )
