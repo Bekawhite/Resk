@@ -394,9 +394,9 @@ if st.session_state.pdf_uploaded:
         col1, col2 = st.columns(2)
         with col1:
             min_rows = st.number_input(
-                "Minimum rows per table", 
+                "Exact number of rows per table", 
                 1, 1000000, 1,
-                help="Minimum number of rows a table must have to be extracted"
+                help="Extract ONLY tables with exactly this many rows"
             )
             min_cols = st.number_input(
                 "Minimum columns per table", 
@@ -434,19 +434,20 @@ if st.session_state.pdf_uploaded:
                 # Extract tables
                 tables_by_page = extract_tables_with_pdfplumber(pdf_path, selected_pages)
                 
-                # Filter tables based on criteria (flexible minimum rows)
+                # Filter tables based on criteria (EXACT row count match)
                 filtered_tables = {}
                 total_tables_found = 0
-                small_tables_ignored = 0
+                tables_ignored = 0
                 
                 for page_num, tables in tables_by_page.items():
                     filtered_page_tables = []
                     for table in tables:
-                        if len(table) >= min_rows and len(table.columns) >= min_cols:
+                        # MODIFIED: Changed from >= to == to get EXACT row count match
+                        if len(table) == min_rows and len(table.columns) >= min_cols:
                             filtered_page_tables.append(table)
                             total_tables_found += 1
                         else:
-                            small_tables_ignored += 1
+                            tables_ignored += 1
                     
                     if filtered_page_tables:
                         filtered_tables[page_num] = filtered_page_tables
@@ -492,17 +493,12 @@ if st.session_state.pdf_uploaded:
                         table_counter += 1
                 
                 if total_tables_found > 0:
-                    if min_rows == 1:
-                        st.success(f"✅ Found {total_tables_found} tables across {len(filtered_tables)} pages")
-                    elif min_rows <= 10:
-                        st.success(f"✅ Found {total_tables_found} tables (≥{min_rows} rows) across {len(filtered_tables)} pages")
-                    else:
-                        st.success(f"✅ Found {total_tables_found} large tables (≥{min_rows} rows) across {len(filtered_tables)} pages")
+                    st.success(f"✅ Found {total_tables_found} tables with exactly {min_rows} rows across {len(filtered_tables)} pages")
                     
-                    if small_tables_ignored > 0:
-                        st.info(f"ℹ️ Ignored {small_tables_ignored} tables with less than {min_rows} rows")
+                    if tables_ignored > 0:
+                        st.info(f"ℹ️ Ignored {tables_ignored} tables that did NOT have exactly {min_rows} rows")
                 else:
-                    st.warning(f"⚠️ No tables found with {min_rows}+ rows. Try reducing the minimum rows or select more pages.")
+                    st.warning(f"⚠️ No tables found with exactly {min_rows} rows. Try a different row count or select more pages.")
                 
             except Exception as e:
                 st.error(f"Error extracting tables: {e}")
@@ -549,7 +545,6 @@ if st.session_state.tables_data:
                     
                     if table_id:
                         # Table header
-                        row_label = "rows" if min_rows == 1 else f"rows (≥{min_rows})"
                         st.markdown(f"### Table {table_idx + 1} ({len(table)} rows × {len(table.columns)} columns)")
                         
                         # Table selection
