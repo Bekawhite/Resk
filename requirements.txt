@@ -24,3 +24,5 @@ python-dateutil
 # Utilities
 typing-extensions
 
+OpenCV 
+Tesseract OCR 
