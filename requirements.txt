@@ -24,5 +24,10 @@ python-dateutil
 # Utilities
 typing-extensions
 
+opencv-python-headless>=4.8.0  # Headless version (no OpenGL dependency)
+pytesseract>=0.3.10
+pillow>=10.0.0
+pdf2image>=1.16.0
+
 
 
