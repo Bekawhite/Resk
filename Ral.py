@@ -19,19 +19,81 @@ import time
 from collections import defaultdict
 
 # ============================================================================
-# IMPORTS WITH ERROR HANDLING
+# PAGE CONFIGURATION - MUST BE FIRST STREAMLIT COMMAND
 # ============================================================================
+
+st.set_page_config(
+    page_title="Advanced Document to Excel Converter",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# ============================================================================
+# IMPORTS WITH ERROR HANDLING AND FALLBACKS
+# ============================================================================
+
+# Try to import scikit-learn with proper error handling
+try:
+    from sklearn.cluster import DBSCAN
+    from sklearn.preprocessing import StandardScaler
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+    # Define fallback DBSCAN-like function
+    class DBSCAN:
+        def __init__(self, eps=0.5, min_samples=2):
+            self.eps = eps
+            self.min_samples = min_samples
+        
+        def fit_predict(self, X):
+            # Simple fallback: return all points as one cluster
+            return np.zeros(len(X), dtype=int)
+    
+    class StandardScaler:
+        def fit_transform(self, X):
+            return X
+
+# Try to import scipy
+try:
+    from scipy import stats
+    from scipy.signal import find_peaks
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    # Simple fallback for find_peaks
+    def find_peaks(x, height=None, distance=None):
+        peaks = []
+        for i in range(1, len(x)-1):
+            if x[i] > x[i-1] and x[i] > x[i+1]:
+                if height is None or x[i] > height:
+                    peaks.append(i)
+        return np.array(peaks), {}
 
 # Computer Vision and OCR imports
 try:
     import cv2
-    import pytesseract
-    from PIL import Image
-    import pdf2image
     CV_AVAILABLE = True
-except ImportError as e:
+except ImportError:
     CV_AVAILABLE = False
-    st.warning(f"Some features may be limited: {e}. Install opencv-python, pytesseract, pillow, pdf2image for full functionality.")
+
+try:
+    import pytesseract
+    TESSERACT_AVAILABLE = True
+except ImportError:
+    TESSERACT_AVAILABLE = False
+
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
+try:
+    import pdf2image
+    PDF2IMAGE_AVAILABLE = True
+except ImportError:
+    PDF2IMAGE_AVAILABLE = False
 
 # PDF processing imports
 try:
@@ -45,31 +107,6 @@ try:
     CAMELOT_AVAILABLE = True
 except ImportError:
     CAMELOT_AVAILABLE = False
-
-# ML imports for pattern detection
-try:
-    from sklearn.cluster import DBSCAN
-    from sklearn.preprocessing import StandardScaler
-    from scipy import stats
-    from scipy.signal import find_peaks
-    ML_AVAILABLE = True
-except ImportError:
-    ML_AVAILABLE = False
-    st.warning("scikit-learn or scipy not available. Install for enhanced pattern detection.")
-    # Define fallback functions if needed
-    def find_peaks(*args, **kwargs):
-        return [], {}
-
-# ============================================================================
-# PAGE CONFIGURATION
-# ============================================================================
-
-st.set_page_config(
-    page_title="Advanced Document to Excel Converter",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
 
 # ============================================================================
 # CUSTOM CSS STYLES
@@ -277,7 +314,10 @@ def init_session_states():
         'ocr_language': 'eng',
         'debug_mode': False,
         'detected_regions': [],
-        'pattern_confidence': {}
+        'pattern_confidence': {},
+        'cv_available': CV_AVAILABLE,
+        'ml_available': SKLEARN_AVAILABLE and SCIPY_AVAILABLE,
+        'pdf_available': PDFPLUMBER_AVAILABLE or CAMELOT_AVAILABLE
     }
     
     for key, value in defaults.items():
@@ -342,27 +382,10 @@ def convert_to_proper_types(df: pd.DataFrame) -> pd.DataFrame:
         # Try to convert to datetime
         try:
             if df_converted[col].dtype == 'object':
-                # Common date formats
-                date_formats = [
-                    '%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%d-%m-%Y', '%Y.%m.%d',
-                    '%d.%m.%Y', '%m.%d.%Y', '%Y%m%d', '%d%m%Y', '%m%d%Y',
-                    '%b %d, %Y', '%d %b %Y', '%B %d, %Y', '%d %B %Y',
-                    '%Y-%m-%d %H:%M:%S', '%d/%m/%Y %H:%M', '%m/%d/%Y %I:%M %p'
-                ]
-                
-                for fmt in date_formats:
-                    try:
-                        date_col = pd.to_datetime(df_converted[col], format=fmt, errors='coerce')
-                        if not date_col.isna().all():
-                            df_converted[col] = date_col
-                            break
-                    except:
-                        continue
-                else:
-                    # Try infer format
-                    date_col = pd.to_datetime(df_converted[col], errors='coerce', infer_datetime_format=True)
-                    if not date_col.isna().all():
-                        df_converted[col] = date_col
+                # Try infer format
+                date_col = pd.to_datetime(df_converted[col], errors='coerce', infer_datetime_format=True)
+                if not date_col.isna().all():
+                    df_converted[col] = date_col
         except:
             pass
         
@@ -419,19 +442,18 @@ def calculate_extraction_stats(tables_data: Dict) -> Dict:
     return stats
 
 # ============================================================================
-# ADVANCED ROW/COLUMN DETECTION FUNCTIONS
+# SIMPLIFIED PATTERN DETECTION (WITHOUT HEAVY ML DEPENDENCIES)
 # ============================================================================
 
-def detect_any_row_column_pattern(image: np.ndarray) -> Dict[str, Any]:
+def simple_pattern_detection(image):
     """
-    Detect ANY pattern of rows and columns in an image using multiple methods
-    Returns detected regions and their confidence scores
+    Simplified pattern detection that doesn't rely on heavy ML libraries
+    Returns detected regions as list of (x, y, w, h) tuples
     """
-    if not CV_AVAILABLE:
-        return {'regions': [], 'confidence': 0}
+    regions = []
     
-    detected_regions = []
-    methods_used = []
+    if not CV_AVAILABLE:
+        return regions
     
     try:
         # Convert to grayscale
@@ -440,963 +462,131 @@ def detect_any_row_column_pattern(image: np.ndarray) -> Dict[str, Any]:
         else:
             gray = image.copy()
         
-        # Method 1: Line detection for grids/tables
-        regions1, conf1 = detect_grid_pattern(gray)
-        if regions1:
-            detected_regions.extend(regions1)
-            methods_used.append(('grid', conf1))
-        
-        # Method 2: Text block alignment detection
-        regions2, conf2 = detect_aligned_text_blocks(gray)
-        if regions2:
-            detected_regions.extend(regions2)
-            methods_used.append(('text_blocks', conf2))
-        
-        # Method 3: Vertical/Horizontal line clustering
-        regions3, conf3 = detect_line_clusters(gray)
-        if regions3:
-            detected_regions.extend(regions3)
-            methods_used.append(('line_clusters', conf3))
-        
-        # Method 4: Content density analysis
-        regions4, conf4 = detect_content_density_pattern(gray)
-        if regions4:
-            detected_regions.extend(regions4)
-            methods_used.append(('density', conf4))
-        
-        # Method 5: Contour-based region detection
-        regions5, conf5 = detect_contour_regions(gray)
-        if regions5:
-            detected_regions.extend(regions5)
-            methods_used.append(('contours', conf5))
-        
-        # Merge overlapping regions
-        merged_regions = merge_overlapping_regions(detected_regions)
-        
-        # Calculate overall confidence
-        overall_confidence = calculate_overall_confidence(methods_used, merged_regions)
-        
-        return {
-            'regions': merged_regions,
-            'confidence': overall_confidence,
-            'methods_used': methods_used,
-            'region_count': len(merged_regions)
-        }
-        
-    except Exception as e:
-        st.warning(f"Pattern detection error: {e}")
-        return {'regions': [], 'confidence': 0, 'methods_used': [], 'region_count': 0}
-
-def detect_grid_pattern(gray: np.ndarray) -> Tuple[List[Dict], float]:
-    """
-    Detect grid-like patterns (traditional tables)
-    """
-    regions = []
-    
-    try:
         # Apply adaptive threshold
-        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                       cv2.THRESH_BINARY_INV, 11, 2)
-        
-        # Detect horizontal lines
-        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
-        horizontal_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horizontal_kernel, iterations=2)
-        
-        # Detect vertical lines
-        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
-        vertical_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, vertical_kernel, iterations=2)
-        
-        # Combine lines
-        grid = cv2.add(horizontal_lines, vertical_lines)
-        
-        # Find grid intersections
-        kernel = np.ones((3,3), np.uint8)
-        grid = cv2.dilate(grid, kernel, iterations=1)
-        
-        # Find contours of grid cells
-        contours, _ = cv2.findContours(grid, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        if len(contours) > 4:  # At least 4 cells to be considered a grid
-            for contour in contours:
-                x, y, w, h = cv2.boundingRect(contour)
-                if w > 20 and h > 20:  # Filter out very small cells
-                    regions.append({
-                        'x': x, 'y': y, 'width': w, 'height': h,
-                        'type': 'grid_cell',
-                        'confidence': min(1.0, len(contours) / 50)  # More cells = higher confidence
-                    })
-        
-        # Calculate confidence based on grid structure
-        confidence = min(1.0, len(regions) / 30) if regions else 0
-        
-        return regions, confidence
-        
-    except Exception as e:
-        return [], 0
-
-def detect_aligned_text_blocks(gray: np.ndarray) -> Tuple[List[Dict], float]:
-    """
-    Detect aligned text blocks (forms, lists, structured text)
-    """
-    regions = []
-    
-    try:
-        # Perform OCR to get text blocks
-        custom_config = r'--psm 6 --oem 3'
-        ocr_data = pytesseract.image_to_data(gray, config=custom_config, output_type=pytesseract.Output.DICT)
-        
-        text_blocks = []
-        for i in range(len(ocr_data['text'])):
-            if int(ocr_data['conf'][i]) > 30:  # Only consider decent confidence text
-                text = ocr_data['text'][i].strip()
-                if text:
-                    text_blocks.append({
-                        'text': text,
-                        'x': ocr_data['left'][i],
-                        'y': ocr_data['top'][i],
-                        'width': ocr_data['width'][i],
-                        'height': ocr_data['height'][i],
-                        'line': ocr_data['line_num'][i],
-                        'block': ocr_data['block_num'][i]
-                    })
-        
-        if len(text_blocks) < 5:
-            return [], 0
-        
-        # Group by vertical position (rows)
-        y_positions = [block['y'] for block in text_blocks]
-        if ML_AVAILABLE:
-            # Use DBSCAN to cluster rows
-            y_scaled = StandardScaler().fit_transform(np.array(y_positions).reshape(-1, 1))
-            row_clusters = DBSCAN(eps=0.5, min_samples=2).fit(y_scaled).labels_
-        else:
-            # Simple threshold-based clustering
-            y_sorted = sorted(y_positions)
-            row_clusters = []
-            current_cluster = 0
-            for i, y in enumerate(y_sorted):
-                if i == 0:
-                    row_clusters.append(0)
-                else:
-                    if y - y_sorted[i-1] > 20:  # New row if gap > 20 pixels
-                        current_cluster += 1
-                    row_clusters.append(current_cluster)
-        
-        # Group by horizontal position (columns) within each row
-        rows_data = defaultdict(list)
-        for block, cluster in zip(text_blocks, row_clusters):
-            rows_data[cluster].append(block)
-        
-        # Detect consistent column patterns
-        column_positions = []
-        for row_num, blocks in rows_data.items():
-            if len(blocks) > 1:  # Row has multiple items
-                x_positions = sorted([b['x'] for b in blocks])
-                column_positions.extend(x_positions)
-        
-        if column_positions:
-            # Cluster column positions
-            if ML_AVAILABLE:
-                col_scaled = StandardScaler().fit_transform(np.array(column_positions).reshape(-1, 1))
-                col_clusters = DBSCAN(eps=0.5, min_samples=2).fit(col_scaled).labels_
-                unique_cols = len(set(col_clusters)) - (1 if -1 in col_clusters else 0)
-            else:
-                # Simple clustering by gaps
-                col_sorted = sorted(set(column_positions))
-                unique_cols = 1
-                for i in range(1, len(col_sorted)):
-                    if col_sorted[i] - col_sorted[i-1] > 50:  # Gap > 50 pixels = new column
-                        unique_cols += 1
-            
-            if unique_cols >= 2:  # At least 2 columns detected
-                # Create region for entire structured area
-                all_x = [b['x'] for b in text_blocks]
-                all_y = [b['y'] for b in text_blocks]
-                all_widths = [b['width'] for b in text_blocks]
-                all_heights = [b['height'] for b in text_blocks]
-                
-                if all_x and all_y:
-                    x_min = min(all_x)
-                    y_min = min(all_y)
-                    x_max = max([x + w for x, w in zip(all_x, all_widths)])
-                    y_max = max([y + h for y, h in zip(all_y, all_heights)])
-                    
-                    regions.append({
-                        'x': x_min,
-                        'y': y_min,
-                        'width': x_max - x_min,
-                        'height': y_max - y_min,
-                        'type': 'structured_text',
-                        'columns_detected': unique_cols,
-                        'rows_detected': len(rows_data),
-                        'confidence': min(1.0, (unique_cols * len(rows_data)) / 30)
-                    })
-        
-        confidence = max([r.get('confidence', 0) for r in regions]) if regions else 0
-        
-        return regions, confidence
-        
-    except Exception as e:
-        return [], 0
-
-def detect_line_clusters(gray: np.ndarray) -> Tuple[List[Dict], float]:
-    """
-    Detect patterns formed by clustered lines (like forms with lines)
-    """
-    regions = []
-    
-    try:
-        # Edge detection
-        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-        
-        # Hough line detection
-        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=100, 
-                                minLineLength=50, maxLineGap=10)
-        
-        if lines is None or len(lines) < 5:
-            return [], 0
-        
-        horizontal_lines = []
-        vertical_lines = []
-        
-        for line in lines:
-            x1, y1, x2, y2 = line[0]
-            angle = abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
-            
-            if angle < 20:  # Near horizontal
-                horizontal_lines.append((y1, abs(x2 - x1)))
-            elif angle > 70:  # Near vertical
-                vertical_lines.append((x1, abs(y2 - y1)))
-        
-        # Cluster horizontal lines to find rows
-        if horizontal_lines:
-            y_positions = [h[0] for h in horizontal_lines]
-            if ML_AVAILABLE:
-                y_scaled = StandardScaler().fit_transform(np.array(y_positions).reshape(-1, 1))
-                row_clusters = DBSCAN(eps=0.3, min_samples=1).fit(y_scaled).labels_
-                row_count = len(set(row_clusters))
-            else:
-                # Simple clustering
-                y_sorted = sorted(set(y_positions))
-                row_count = 1
-                for i in range(1, len(y_sorted)):
-                    if y_sorted[i] - y_sorted[i-1] > 30:
-                        row_count += 1
-        else:
-            row_count = 0
-        
-        # Cluster vertical lines to find columns
-        if vertical_lines:
-            x_positions = [v[0] for v in vertical_lines]
-            if ML_AVAILABLE:
-                x_scaled = StandardScaler().fit_transform(np.array(x_positions).reshape(-1, 1))
-                col_clusters = DBSCAN(eps=0.3, min_samples=1).fit(x_scaled).labels_
-                col_count = len(set(col_clusters))
-            else:
-                x_sorted = sorted(set(x_positions))
-                col_count = 1
-                for i in range(1, len(x_sorted)):
-                    if x_sorted[i] - x_sorted[i-1] > 30:
-                        col_count += 1
-        else:
-            col_count = 0
-        
-        if row_count >= 2 and col_count >= 2:
-            # Create region covering the line intersections
-            all_x = [v[0] for v in vertical_lines] if vertical_lines else []
-            all_y = [h[0] for h in horizontal_lines] if horizontal_lines else []
-            
-            if all_x and all_y:
-                regions.append({
-                    'x': min(all_x) - 20,
-                    'y': min(all_y) - 20,
-                    'width': max(all_x) - min(all_x) + 40,
-                    'height': max(all_y) - min(all_y) + 40,
-                    'type': 'line_grid',
-                    'rows': row_count,
-                    'columns': col_count,
-                    'confidence': min(1.0, (row_count * col_count) / 50)
-                })
-        
-        confidence = max([r.get('confidence', 0) for r in regions]) if regions else 0
-        
-        return regions, confidence
-        
-    except Exception as e:
-        return [], 0
-
-def detect_content_density_pattern(gray: np.ndarray) -> Tuple[List[Dict], float]:
-    """
-    Detect patterns based on content density (where text/objects are clustered)
-    """
-    regions = []
-    
-    try:
-        # Threshold to get foreground
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        
-        # Create density map
-        density_map = np.zeros_like(gray, dtype=np.float32)
-        kernel_size = 20
-        kernel = np.ones((kernel_size, kernel_size), np.float32) / (kernel_size * kernel_size)
-        
-        # Calculate local density
-        density = cv2.filter2D(binary.astype(np.float32), -1, kernel)
-        
-        # Threshold density to find high-density regions
-        density_threshold = 0.3  # 30% density threshold
-        high_density = (density > density_threshold).astype(np.uint8) * 255
-        
-        # Find contours of high-density regions
-        contours, _ = cv2.findContours(high_density, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        for contour in contours:
-            x, y, w, h = cv2.boundingRect(contour)
-            if w > 100 and h > 50:  # Minimum region size
-                # Analyze internal structure
-                roi = binary[y:y+h, x:x+w]
-                
-                # Count vertical and horizontal transitions (potential columns/rows)
-                vertical_projection = np.sum(roi, axis=1) / 255
-                horizontal_projection = np.sum(roi, axis=0) / 255
-                
-                # Detect peaks in projections (indicating rows/columns)
-                if ML_AVAILABLE:
-                    from scipy.signal import find_peaks
-                    vertical_peaks, _ = find_peaks(vertical_projection, distance=10, height=5)
-                    horizontal_peaks, _ = find_peaks(horizontal_projection, distance=10, height=5)
-                else:
-                    # Simple peak detection
-                    vertical_peaks = []
-                    for i in range(1, len(vertical_projection)-1):
-                        if vertical_projection[i] > vertical_projection[i-1] and vertical_projection[i] > vertical_projection[i+1] and vertical_projection[i] > 5:
-                            vertical_peaks.append(i)
-                    
-                    horizontal_peaks = []
-                    for i in range(1, len(horizontal_projection)-1):
-                        if horizontal_projection[i] > horizontal_projection[i-1] and horizontal_projection[i] > horizontal_projection[i+1] and horizontal_projection[i] > 5:
-                            horizontal_peaks.append(i)
-                
-                row_count = len(vertical_peaks)
-                col_count = len(horizontal_peaks)
-                
-                if row_count >= 2 and col_count >= 2:
-                    regions.append({
-                        'x': x,
-                        'y': y,
-                        'width': w,
-                        'height': h,
-                        'type': 'density_pattern',
-                        'rows': row_count,
-                        'columns': col_count,
-                        'confidence': min(1.0, (row_count * col_count) / 40)
-                    })
-        
-        confidence = max([r.get('confidence', 0) for r in regions]) if regions else 0
-        
-        return regions, confidence
-        
-    except Exception as e:
-        return [], 0
-
-def detect_contour_regions(gray: np.ndarray) -> Tuple[List[Dict], float]:
-    """
-    Detect regions based on contours (separate blocks that might form a table)
-    """
-    regions = []
-    
-    try:
-        # Apply threshold
-        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         
         # Find contours
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        # Filter contours by size
-        valid_contours = []
+        # Filter contours by size and shape
         for contour in contours:
-            area = cv2.contourArea(contour)
-            if area > 1000:  # Minimum area
-                x, y, w, h = cv2.boundingRect(contour)
-                if w > 30 and h > 30:
-                    valid_contours.append((x, y, w, h))
+            x, y, w, h = cv2.boundingRect(contour)
+            if w > 100 and h > 50:  # Minimum region size
+                aspect_ratio = w / h
+                if 0.5 < aspect_ratio < 3.0:  # Reasonable aspect ratio for tables
+                    regions.append({'x': x, 'y': y, 'width': w, 'height': h, 'confidence': 0.5})
         
-        if len(valid_contours) < 4:
-            return [], 0
-        
-        # Sort by position
-        valid_contours.sort(key=lambda x: (x[1], x[0]))
-        
-        # Group into rows
-        rows = []
-        current_row = []
-        current_y = valid_contours[0][1]
-        
-        for contour in valid_contours:
-            x, y, w, h = contour
-            if abs(y - current_y) < 30:  # Same row
-                current_row.append(contour)
-            else:
-                if current_row:
-                    rows.append(current_row)
-                current_row = [contour]
-                current_y = y
-        
-        if current_row:
-            rows.append(current_row)
-        
-        # Check if we have a grid-like structure
-        if len(rows) >= 2:
-            # Sort each row by x position
-            for row in rows:
-                row.sort(key=lambda x: x[0])
-            
-            # Check column consistency across rows
-            col_counts = [len(row) for row in rows]
-            if max(col_counts) >= 2:
-                # Find most common column count
-                if ML_AVAILABLE:
-                    common_cols = stats.mode(col_counts)[0][0]
-                else:
-                    # Simple mode calculation
-                    from collections import Counter
-                    common_cols = Counter(col_counts).most_common(1)[0][0]
-                
-                if common_cols >= 2:
-                    # Create region for entire structure
-                    all_x = [c[0] for row in rows for c in row]
-                    all_y = [c[1] for row in rows for c in row]
-                    all_x2 = [c[0] + c[2] for row in rows for c in row]
-                    all_y2 = [c[1] + c[3] for row in rows for c in row]
-                    
-                    regions.append({
-                        'x': min(all_x) - 10,
-                        'y': min(all_y) - 10,
-                        'width': max(all_x2) - min(all_x) + 20,
-                        'height': max(all_y2) - min(all_y) + 20,
-                        'type': 'contour_grid',
-                        'rows': len(rows),
-                        'columns': common_cols,
-                        'confidence': min(1.0, len(valid_contours) / 50)
-                    })
-        
-        confidence = max([r.get('confidence', 0) for r in regions]) if regions else 0
-        
-        return regions, confidence
+        return regions
         
     except Exception as e:
-        return [], 0
+        return []
 
-def merge_overlapping_regions(regions: List[Dict]) -> List[Dict]:
+# ============================================================================
+# BASIC OCR EXTRACTION FUNCTIONS
+# ============================================================================
+
+def basic_ocr_extraction(image):
     """
-    Merge overlapping regions to avoid duplicates
+    Basic OCR extraction without complex dependencies
     """
-    if not regions:
+    if not TESSERACT_AVAILABLE:
         return []
     
-    # Sort by area (largest first)
-    regions.sort(key=lambda x: x['width'] * x['height'], reverse=True)
-    
-    merged = []
-    used = set()
-    
-    for i, region in enumerate(regions):
-        if i in used:
-            continue
-        
-        current = region.copy()
-        used.add(i)
-        
-        # Check for overlapping regions
-        for j, other in enumerate(regions[i+1:], i+1):
-            if j in used:
-                continue
-            
-            # Calculate overlap
-            x_overlap = max(0, min(current['x'] + current['width'], 
-                                  other['x'] + other['width']) - 
-                          max(current['x'], other['x']))
-            y_overlap = max(0, min(current['y'] + current['height'],
-                                  other['y'] + other['height']) -
-                          max(current['y'], other['y']))
-            
-            overlap_area = x_overlap * y_overlap
-            current_area = current['width'] * current['height']
-            
-            if overlap_area > 0.3 * current_area:  # Significant overlap
-                # Merge regions
-                current['x'] = min(current['x'], other['x'])
-                current['y'] = min(current['y'], other['y'])
-                current['width'] = max(current['x'] + current['width'],
-                                     other['x'] + other['width']) - current['x']
-                current['height'] = max(current['y'] + current['height'],
-                                      other['y'] + other['height']) - current['y']
-                current['confidence'] = max(current['confidence'], other.get('confidence', 0))
-                used.add(j)
-        
-        merged.append(current)
-    
-    return merged
-
-def calculate_overall_confidence(methods_used: List[Tuple[str, float]], 
-                                 regions: List[Dict]) -> float:
-    """
-    Calculate overall confidence in detected patterns
-    """
-    if not methods_used:
-        return 0
-    
-    # Weight each method's confidence
-    method_weights = {
-        'grid': 1.2,        # Grid patterns are most reliable
-        'text_blocks': 1.0,  # Text alignment is reliable
-        'line_clusters': 0.9,
-        'density': 0.7,
-        'contours': 0.6
-    }
-    
-    weighted_sum = sum(conf * method_weights.get(method, 0.5) 
-                      for method, conf in methods_used)
-    max_possible = sum(method_weights.get(method, 0.5) for method, _ in methods_used)
-    
-    base_confidence = weighted_sum / max_possible if max_possible > 0 else 0
-    
-    # Adjust based on number of regions
-    region_factor = min(1.0, len(regions) / 20) if regions else 0
-    
-    # Adjust based on region consistency
-    if regions:
-        confidences = [r.get('confidence', 0) for r in regions]
-        consistency_factor = 1 - np.std(confidences) if confidences else 0
-    else:
-        consistency_factor = 0
-    
-    overall = (base_confidence * 0.5 + region_factor * 0.3 + consistency_factor * 0.2)
-    
-    return min(1.0, overall)
-
-# ============================================================================
-# ENHANCED OCR EXTRACTION FUNCTIONS
-# ============================================================================
-
-def extract_from_any_pattern(image: np.ndarray, 
-                           detection_result: Dict,
-                           lang: str = 'eng',
-                           min_confidence: float = 0.3) -> List[pd.DataFrame]:
-    """
-    Extract data from detected patterns using appropriate method
-    """
-    tables_found = []
-    
-    if not detection_result['regions']:
-        return tables_found
-    
-    for region in detection_result['regions']:
-        if region.get('confidence', 0) < min_confidence:
-            continue
-        
-        # Extract region of interest
-        x, y, w, h = region['x'], region['y'], region['width'], region['height']
-        
-        # Add padding
-        padding = 10
-        x = max(0, x - padding)
-        y = max(0, y - padding)
-        w = min(image.shape[1] - x, w + 2*padding)
-        h = min(image.shape[0] - y, h + 2*padding)
-        
-        roi = image[y:y+h, x:x+w]
-        
-        # Extract based on region type
-        if region.get('type') in ['grid_cell', 'line_grid']:
-            # Structured grid extraction
-            df = extract_structured_grid(roi, lang)
-        elif region.get('type') == 'structured_text':
-            # Text alignment based extraction
-            df = extract_aligned_text(roi, lang, 
-                                     region.get('columns_detected', 2))
-        elif region.get('type') in ['density_pattern', 'contour_grid']:
-            # Generic pattern extraction
-            df = extract_generic_pattern(roi, lang)
-        else:
-            # Default extraction
-            df = extract_generic_pattern(roi, lang)
-        
-        if df is not None and not df.empty and len(df) >= 2 and len(df.columns) >= 2:
-            tables_found.append(df)
-    
-    return tables_found
-
-def extract_structured_grid(roi: np.ndarray, lang: str) -> Optional[pd.DataFrame]:
-    """
-    Extract from grid-structured regions
-    """
     try:
-        # Detect grid lines
-        if len(roi.shape) == 3:
-            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = roi.copy()
-        
-        # Apply threshold
-        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                      cv2.THRESH_BINARY_INV, 11, 2)
-        
-        # Detect horizontal and vertical lines
-        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
-        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
-        
-        horizontal_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, horizontal_kernel, iterations=2)
-        vertical_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, vertical_kernel, iterations=2)
-        
-        # Find line positions
-        h_projection = np.sum(horizontal_lines, axis=1) / 255
-        v_projection = np.sum(vertical_lines, axis=0) / 255
-        
-        # Find row boundaries
-        row_boundaries = []
-        in_row = False
-        row_start = 0
-        
-        for i, val in enumerate(h_projection):
-            if val > 10 and not in_row:
-                in_row = True
-                row_start = i
-            elif val <= 10 and in_row:
-                if i - row_start > 10:
-                    row_boundaries.append((row_start, i))
-                in_row = False
-        
-        # Find column boundaries
-        col_boundaries = []
-        in_col = False
-        col_start = 0
-        
-        for i, val in enumerate(v_projection):
-            if val > 10 and not in_col:
-                in_col = True
-                col_start = i
-            elif val <= 10 and in_col:
-                if i - col_start > 10:
-                    col_boundaries.append((col_start, i))
-                in_col = False
-        
-        # Extract cells
-        table_data = []
-        for row_start, row_end in row_boundaries:
-            row_data = []
-            for col_start, col_end in col_boundaries:
-                # Extract cell
-                cell = gray[row_start:row_end, col_start:col_end]
-                if cell.size > 0:
-                    # OCR on cell
-                    text = pytesseract.image_to_string(cell, config=f'--psm 7 -l {lang}').strip()
-                    row_data.append(text)
-                else:
-                    row_data.append('')
-            if any(row_data):
-                table_data.append(row_data)
-        
-        if len(table_data) >= 2:
-            df = pd.DataFrame(table_data)
-            df = df.replace('', pd.NA).dropna(how='all')
-            
-            # Try to set header
-            if len(df) > 1:
-                first_row = df.iloc[0].astype(str)
-                if first_row.str.contains(r'[a-zA-Z]').any():
-                    df.columns = first_row
-                    df = df[1:].reset_index(drop=True)
-            
-            return df
-        
-        return None
-        
-    except Exception as e:
-        return None
-
-def extract_aligned_text(roi: np.ndarray, lang: str, expected_cols: int) -> Optional[pd.DataFrame]:
-    """
-    Extract from aligned text regions
-    """
-    try:
-        # Get OCR data with position
-        custom_config = f'--psm 6 --oem 3 -l {lang}'
-        ocr_data = pytesseract.image_to_data(roi, config=custom_config, 
-                                            output_type=pytesseract.Output.DICT)
+        # Get OCR data
+        custom_config = '--psm 6 --oem 3'
+        data = pytesseract.image_to_data(image, config=custom_config, output_type=pytesseract.Output.DICT)
         
         # Group by line
         lines = {}
-        for i in range(len(ocr_data['text'])):
-            if int(ocr_data['conf'][i]) > 30:
-                text = ocr_data['text'][i].strip()
+        for i in range(len(data['text'])):
+            if int(data['conf'][i]) > 30:  # Reasonable confidence
+                text = data['text'][i].strip()
                 if text:
-                    line_num = ocr_data['line_num'][i]
+                    line_num = data['line_num'][i]
                     if line_num not in lines:
                         lines[line_num] = []
                     lines[line_num].append({
                         'text': text,
-                        'x': ocr_data['left'][i],
-                        'width': ocr_data['width'][i],
-                        'conf': ocr_data['conf'][i]
+                        'x': data['left'][i],
+                        'conf': data['conf'][i]
                     })
         
-        # Sort lines by y position
-        sorted_lines = sorted(lines.items(), key=lambda x: x[1][0]['x'] if x[1] else 0)
-        
-        # Detect column boundaries
-        all_x = []
-        for _, words in sorted_lines:
-            for word in words:
-                all_x.append(word['x'])
-        
-        if not all_x:
-            return None
-        
-        # Cluster x positions to find columns
-        if ML_AVAILABLE and len(all_x) > 10:
-            x_scaled = StandardScaler().fit_transform(np.array(all_x).reshape(-1, 1))
-            col_clusters = DBSCAN(eps=0.5, min_samples=2).fit(x_scaled).labels_
-            unique_cols = len(set(col_clusters)) - (1 if -1 in col_clusters else 0)
-            
-            # Calculate column boundaries
-            col_boundaries = []
-            for cluster_id in range(unique_cols):
-                cluster_x = [x for x, c in zip(all_x, col_clusters) if c == cluster_id]
-                if cluster_x:
-                    col_boundaries.append((min(cluster_x), max(cluster_x)))
-            
-            col_boundaries.sort(key=lambda x: x[0])
-        else:
-            # Simple threshold-based column detection
-            all_x_sorted = sorted(set(all_x))
-            col_boundaries = []
-            current_start = all_x_sorted[0]
-            
-            for i in range(1, len(all_x_sorted)):
-                if all_x_sorted[i] - all_x_sorted[i-1] > 50:
-                    col_boundaries.append((current_start, all_x_sorted[i-1]))
-                    current_start = all_x_sorted[i]
-            
-            col_boundaries.append((current_start, all_x_sorted[-1]))
-        
-        # Build table
+        # Convert to simple table format
         table_data = []
-        for line_num, words in sorted_lines:
-            # Sort words in line by x position
+        for line_num in sorted(lines.keys()):
+            words = lines[line_num]
             words.sort(key=lambda x: x['x'])
-            
-            # Create row with all columns
-            row = [''] * len(col_boundaries)
-            
-            for word in words:
-                # Find which column this word belongs to
-                for i, (col_start, col_end) in enumerate(col_boundaries):
-                    if word['x'] >= col_start and word['x'] <= col_end:
-                        if row[i]:
-                            row[i] += ' ' + word['text']
-                        else:
-                            row[i] = word['text']
-                        break
-            
-            if any(row):
+            row = [word['text'] for word in words]
+            if row:
                 table_data.append(row)
         
         if len(table_data) >= 2:
             df = pd.DataFrame(table_data)
-            df = df.replace('', pd.NA).dropna(how='all')
-            
-            # Try to detect header
-            if len(df) > 1:
-                first_row = df.iloc[0].astype(str)
-                if first_row.str.contains(r'[a-zA-Z]').any():
-                    df.columns = first_row
-                    df = df[1:].reset_index(drop=True)
-            
-            return df
+            return [df]
         
-        return None
+        return []
         
     except Exception as e:
-        return None
-
-def extract_generic_pattern(roi: np.ndarray, lang: str) -> Optional[pd.DataFrame]:
-    """
-    Generic extraction for any pattern that might be tabular
-    """
-    try:
-        # Perform OCR with position data
-        custom_config = f'--psm 6 --oem 3 -l {lang}'
-        ocr_data = pytesseract.image_to_data(roi, config=custom_config,
-                                            output_type=pytesseract.Output.DICT)
-        
-        # Group text by lines
-        lines = {}
-        for i in range(len(ocr_data['text'])):
-            if int(ocr_data['conf'][i]) > 30:
-                text = ocr_data['text'][i].strip()
-                if text:
-                    line_num = ocr_data['line_num'][i]
-                    if line_num not in lines:
-                        lines[line_num] = []
-                    lines[line_num].append({
-                        'text': text,
-                        'x': ocr_data['left'][i],
-                        'y': ocr_data['top'][i],
-                        'width': ocr_data['width'][i]
-                    })
-        
-        if len(lines) < 2:
-            return None
-        
-        # Detect potential column separators
-        all_x = []
-        for line_words in lines.values():
-            for word in line_words:
-                all_x.append(word['x'])
-        
-        # Find gaps in x positions (potential column boundaries)
-        if len(all_x) > 5:
-            all_x_sorted = sorted(all_x)
-            gaps = []
-            for i in range(1, len(all_x_sorted)):
-                gap = all_x_sorted[i] - all_x_sorted[i-1]
-                if gap > 20:
-                    gaps.append((all_x_sorted[i-1], all_x_sorted[i], gap))
-            
-            # Sort gaps by size and take the largest ones as column boundaries
-            gaps.sort(key=lambda x: x[2], reverse=True)
-            
-            # Determine number of columns based on gaps
-            if gaps:
-                # Use top N gaps where N is the number of columns - 1
-                potential_cols = len(gaps) + 1
-                if potential_cols >= 2 and potential_cols <= 10:
-                    # Build table with detected columns
-                    table_data = []
-                    for line_num in sorted(lines.keys()):
-                        words = lines[line_num]
-                        words.sort(key=lambda x: x['x'])
-                        
-                        row = [''] * potential_cols
-                        for word in words:
-                            # Find column based on x position
-                            col_idx = 0
-                            for i, (gap_start, gap_end, _) in enumerate(gaps):
-                                if word['x'] > gap_end:
-                                    col_idx = i + 1
-                                else:
-                                    break
-                            
-                            if row[col_idx]:
-                                row[col_idx] += ' ' + word['text']
-                            else:
-                                row[col_idx] = word['text']
-                        
-                        if any(row):
-                            table_data.append(row)
-                    
-                    if len(table_data) >= 2:
-                        df = pd.DataFrame(table_data)
-                        df = df.replace('', pd.NA).dropna(how='all')
-                        
-                        # Try to detect header
-                        if len(df) > 1:
-                            first_row = df.iloc[0].astype(str)
-                            if first_row.str.contains(r'[a-zA-Z]').any():
-                                df.columns = first_row
-                                df = df[1:].reset_index(drop=True)
-                        
-                        return df
-        
-        # If no clear columns detected, try simpler approach - split by multiple spaces
-        full_text = pytesseract.image_to_string(roi, config=f'--psm 6 -l {lang}')
-        lines = full_text.split('\n')
-        
-        table_data = []
-        for line in lines:
-            # Split by multiple spaces
-            parts = [part.strip() for part in re.split(r'\s{2,}', line) if part.strip()]
-            if len(parts) >= 2:
-                table_data.append(parts)
-        
-        if len(table_data) >= 2:
-            df = pd.DataFrame(table_data)
-            return df
-        
-        return None
-        
-    except Exception as e:
-        return None
+        return []
 
 # ============================================================================
-# IMAGE PROCESSING FUNCTIONS
+# SIMPLE PDF EXTRACTION
 # ============================================================================
 
-def preprocess_image_for_ocr(image: np.ndarray) -> np.ndarray:
+def extract_pdf_tables(pdf_path: str, page_num: int) -> List[pd.DataFrame]:
     """
-    Advanced image preprocessing for better OCR results
-    Handles various image quality issues
+    Extract tables from PDF using available libraries
     """
-    if not CV_AVAILABLE:
-        return image
+    tables = []
     
-    try:
-        # Convert to grayscale if needed
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = image.copy()
-        
-        # Apply adaptive histogram equalization for better contrast
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        enhanced = clahe.apply(gray)
-        
-        # Denoise
-        denoised = cv2.fastNlMeansDenoising(enhanced, None, 30, 7, 21)
-        
-        # Apply adaptive thresholding
-        binary = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                      cv2.THRESH_BINARY, 11, 2)
-        
-        # Remove small noise
-        kernel = np.ones((1,1), np.uint8)
-        cleaned = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
-        
-        # Deskew if needed
-        coords = np.column_stack(np.where(cleaned > 0))
-        if len(coords) > 0:
-            angle = cv2.minAreaRect(coords)[-1]
-            if angle < -45:
-                angle = -(90 + angle)
-            else:
-                angle = -angle
-            if abs(angle) > 0.5:
-                (h, w) = cleaned.shape[:2]
-                center = (w // 2, h // 2)
-                M = cv2.getRotationMatrix2D(center, angle, 1.0)
-                cleaned = cv2.warpAffine(cleaned, M, (w, h), 
-                                        flags=cv2.INTER_CUBIC, 
-                                        borderMode=cv2.BORDER_REPLICATE)
-        
-        return cleaned
-        
-    except Exception as e:
-        st.warning(f"Image preprocessing warning: {e}")
-        return image
+    # Try pdfplumber first
+    if PDFPLUMBER_AVAILABLE:
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                if page_num <= len(pdf.pages):
+                    page = pdf.pages[page_num - 1]
+                    page_tables = page.extract_tables()
+                    
+                    for table_data in page_tables:
+                        if table_data and len(table_data) > 1:
+                            df = pd.DataFrame(table_data)
+                            df = df.replace('', pd.NA).dropna(how='all').reset_index(drop=True)
+                            df = df.dropna(axis=1, how='all')
+                            
+                            if not df.empty and len(df) > 1:
+                                tables.append(df)
+        except Exception as e:
+            pass
+    
+    # Try camelot if available
+    if CAMELOT_AVAILABLE:
+        try:
+            tables_camelot = camelot.read_pdf(pdf_path, pages=str(page_num), flavor='lattice')
+            for table in tables_camelot:
+                df = table.df
+                if not df.empty and len(df) > 1:
+                    tables.append(df)
+            
+            if not tables:
+                tables_camelot = camelot.read_pdf(pdf_path, pages=str(page_num), flavor='stream')
+                for table in tables_camelot:
+                    df = table.df
+                    if not df.empty and len(df) > 1:
+                        tables.append(df)
+        except Exception as e:
+            pass
+    
+    return tables
 
 # ============================================================================
-# ENHANCED MAIN EXTRACTION FUNCTION
+# MAIN EXTRACTION FUNCTION
 # ============================================================================
 
-def extract_any_pattern_from_document(file_path: str,
-                                     pages: List[int],
-                                     mode: str = "Auto-detect (Any Rows/Columns)",
-                                     ocr_lang: str = 'eng',
-                                     min_confidence: float = 0.3,
-                                     enhance: bool = True) -> Dict[int, List[pd.DataFrame]]:
+def extract_tables_from_document(file_path: str, pages: List[int], mode: str) -> Dict[int, List[pd.DataFrame]]:
     """
-    Universal extractor that detects ANY row/column pattern in documents
+    Main extraction function that handles different document types
     """
     tables_by_page = {}
     file_ext = file_path.split('.')[-1].lower()
@@ -1404,204 +594,55 @@ def extract_any_pattern_from_document(file_path: str,
     for page_num in pages:
         page_tables = []
         
-        # Get page image
-        try:
-            if file_ext == 'pdf':
-                # Convert PDF page to image
-                images = pdf2image.convert_from_path(file_path, first_page=page_num, 
-                                                    last_page=page_num, dpi=300)
-                if images:
-                    image = np.array(images[0])
-                    if len(image.shape) == 3:
-                        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-            else:
-                # Load image directly
-                image = cv2.imread(file_path)
-                if image is None:
-                    # Try with PIL
-                    pil_image = Image.open(file_path)
-                    image = np.array(pil_image)
-                    if len(image.shape) == 3:
-                        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        except Exception as e:
-            st.warning(f"Could not load page {page_num}: {e}")
-            continue
+        # Handle PDF files
+        if file_ext == 'pdf':
+            # Try PDF extraction methods
+            pdf_tables = extract_pdf_tables(file_path, page_num)
+            page_tables.extend(pdf_tables)
         
-        if image is None:
-            continue
-        
-        # Preprocess image
-        if enhance:
-            processed = preprocess_image_for_ocr(image)
-        else:
-            processed = image
-        
-        # Method 1: Pattern-based detection (for any row/column structure)
-        if mode in ["Auto-detect (Any Rows/Columns)", "Pattern Detection", "All Methods"]:
-            detection_result = detect_any_row_column_pattern(processed)
-            
-            if detection_result['regions']:
-                pattern_tables = extract_from_any_pattern(processed, detection_result,
-                                                        lang=ocr_lang,
-                                                        min_confidence=min_confidence)
-                page_tables.extend(pattern_tables)
-                
-                # Store detection info for debugging
-                if 'detected_regions' not in st.session_state:
-                    st.session_state.detected_regions = {}
-                st.session_state.detected_regions[page_num] = detection_result
-        
-        # Method 2: Traditional table extraction (for structured tables)
-        if mode in ["Traditional Tables", "All Methods"] and file_ext == 'pdf':
-            if PDFPLUMBER_AVAILABLE:
-                pdf_tables = extract_with_pdfplumber(file_path, page_num)
-                page_tables.extend(pdf_tables)
-            
-            if CAMELOT_AVAILABLE:
-                camelot_tables = extract_with_camelot(file_path, page_num)
-                page_tables.extend(camelot_tables)
-        
-        # Method 3: Simple text-based extraction (as fallback)
-        if mode in ["Text-based", "All Methods"]:
+        # For images or scanned PDFs, try OCR
+        if not page_tables and TESSERACT_AVAILABLE:
             try:
-                if file_ext == 'pdf' and PDFPLUMBER_AVAILABLE:
-                    with pdfplumber.open(file_path) as pdf:
-                        if page_num <= len(pdf.pages):
-                            text = pdf.pages[page_num - 1].extract_text()
-                            if text:
-                                df = extract_table_from_text(text)
-                                if df is not None and not df.empty:
-                                    page_tables.append(df)
+                # Convert PDF page to image if needed
+                if file_ext == 'pdf' and PDF2IMAGE_AVAILABLE:
+                    images = pdf2image.convert_from_path(file_path, first_page=page_num, 
+                                                        last_page=page_num, dpi=200)
+                    if images:
+                        image = np.array(images[0])
                 else:
-                    # OCR the whole image
-                    text = pytesseract.image_to_string(processed, config=f'--psm 6 -l {ocr_lang}')
-                    df = extract_table_from_text(text)
-                    if df is not None and not df.empty:
-                        page_tables.append(df)
-            except:
-                pass
+                    # Load image directly
+                    if PIL_AVAILABLE:
+                        image = np.array(Image.open(file_path))
+                    else:
+                        image = cv2.imread(file_path)
+                
+                if image is not None:
+                    # Simple pattern detection
+                    regions = simple_pattern_detection(image)
+                    
+                    if regions:
+                        for region in regions:
+                            # Extract region
+                            x, y, w, h = region['x'], region['y'], region['width'], region['height']
+                            roi = image[y:y+h, x:x+w]
+                            
+                            # OCR the region
+                            ocr_tables = basic_ocr_extraction(roi)
+                            page_tables.extend(ocr_tables)
+                    
+                    # If no regions found, try OCR on whole image
+                    if not page_tables:
+                        ocr_tables = basic_ocr_extraction(image)
+                        page_tables.extend(ocr_tables)
+                        
+            except Exception as e:
+                if st.session_state.debug_mode:
+                    st.warning(f"OCR error on page {page_num}: {e}")
         
-        # Deduplicate tables
-        unique_tables = deduplicate_tables(page_tables)
-        
-        if unique_tables:
-            tables_by_page[page_num] = unique_tables
+        if page_tables:
+            tables_by_page[page_num] = page_tables
     
     return tables_by_page
-
-def extract_with_pdfplumber(pdf_path: str, page_num: int) -> List[pd.DataFrame]:
-    """Extract tables using pdfplumber"""
-    if not PDFPLUMBER_AVAILABLE:
-        return []
-    
-    page_tables = []
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            if page_num <= len(pdf.pages):
-                page = pdf.pages[page_num - 1]
-                
-                # Try table extraction
-                tables = page.extract_tables()
-                for table_data in tables:
-                    df = process_table_data(table_data)
-                    if not df.empty:
-                        page_tables.append(df)
-    except Exception as e:
-        st.warning(f"pdfplumber extraction warning on page {page_num}: {e}")
-    
-    return page_tables
-
-def extract_with_camelot(pdf_path: str, page_num: int) -> List[pd.DataFrame]:
-    """Extract tables using camelot"""
-    if not CAMELOT_AVAILABLE:
-        return []
-    
-    page_tables = []
-    try:
-        # Try lattice mode first (for tables with borders)
-        tables = camelot.read_pdf(pdf_path, pages=str(page_num), flavor='lattice')
-        for table in tables:
-            df = table.df
-            if not df.empty and len(df) > 1:
-                page_tables.append(df)
-        
-        # If no tables found, try stream mode
-        if not page_tables:
-            tables = camelot.read_pdf(pdf_path, pages=str(page_num), flavor='stream')
-            for table in tables:
-                df = table.df
-                if not df.empty and len(df) > 1:
-                    page_tables.append(df)
-    except Exception as e:
-        st.warning(f"camelot extraction warning on page {page_num}: {e}")
-    
-    return page_tables
-
-def process_table_data(table_data: List[List]) -> pd.DataFrame:
-    """Process raw table data into a clean DataFrame"""
-    if not table_data or len(table_data) <= 1:
-        return pd.DataFrame()
-    
-    df = pd.DataFrame(table_data)
-    df = df.replace('', pd.NA).dropna(how='all').reset_index(drop=True)
-    df = df.dropna(axis=1, how='all')
-    
-    if not df.empty and len(df) > 0:
-        # Try to set header
-        if len(df) > 1:
-            first_row = df.iloc[0].astype(str)
-            if first_row.str.contains(r'[a-zA-Z]').any():
-                df.columns = first_row
-                df = df[1:].reset_index(drop=True)
-        
-        df.columns = [f'Column_{i+1}' if pd.isna(col) or str(col).strip() == '' else str(col).strip() 
-                     for i, col in enumerate(df.columns)]
-    
-    return df
-
-def extract_table_from_text(text: str) -> pd.DataFrame:
-    """Extract table from structured text"""
-    lines = text.split('\n')
-    table_data = []
-    
-    for line in lines:
-        # Try multiple space separation
-        parts = [part.strip() for part in re.split(r'\s{2,}', line) if part.strip()]
-        if len(parts) >= 2:
-            table_data.append(parts)
-        else:
-            # Try common delimiters
-            parts = [part.strip() for part in re.split(r'[|,;\t]', line) if part.strip()]
-            if len(parts) >= 2:
-                table_data.append(parts)
-    
-    if len(table_data) >= 2:
-        df = pd.DataFrame(table_data)
-        df = df.replace('', pd.NA).dropna(how='all')
-        
-        # Try to detect header
-        if len(df) > 1:
-            first_row = df.iloc[0].astype(str)
-            if first_row.str.contains(r'[a-zA-Z]').any():
-                df.columns = first_row
-                df = df[1:].reset_index(drop=True)
-        
-        return df
-    
-    return pd.DataFrame()
-
-def deduplicate_tables(tables: List[pd.DataFrame]) -> List[pd.DataFrame]:
-    """Remove duplicate tables"""
-    unique_tables = []
-    for table in tables:
-        is_duplicate = False
-        for existing in unique_tables:
-            if table.shape == existing.shape and table.equals(existing):
-                is_duplicate = True
-                break
-        if not is_duplicate:
-            unique_tables.append(table)
-    return unique_tables
 
 # ============================================================================
 # DATA ANALYSIS FUNCTIONS
@@ -1688,81 +729,84 @@ def apply_excel_formatting(writer: pd.ExcelWriter, auto_format: bool):
     if not auto_format:
         return
     
-    from openpyxl.utils import get_column_letter
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    
-    for sheet_name in writer.sheets:
-        worksheet = writer.sheets[sheet_name]
+    try:
+        from openpyxl.utils import get_column_letter
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
         
-        # Skip metadata sheet for heavy formatting
-        if sheet_name == 'Metadata':
-            # Simple formatting for metadata
+        for sheet_name in writer.sheets:
+            worksheet = writer.sheets[sheet_name]
+            
+            # Skip metadata sheet for heavy formatting
+            if sheet_name == 'Metadata':
+                # Simple formatting for metadata
+                for column in worksheet.columns:
+                    max_length = 0
+                    column_letter = get_column_letter(column[0].column)
+                    for cell in column:
+                        try:
+                            if cell.value:
+                                max_length = max(max_length, len(str(cell.value)))
+                        except:
+                            pass
+                    worksheet.column_dimensions[column_letter].width = min(max_length + 2, 50)
+                continue
+            
+            # Format header row
+            header_font = Font(bold=True, color="FFFFFF")
+            header_fill = PatternFill(start_color="4CAF50", end_color="4CAF50", fill_type="solid")
+            header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            
+            for cell in worksheet[1]:
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_alignment
+            
+            # Auto-fit columns and format data
             for column in worksheet.columns:
                 max_length = 0
                 column_letter = get_column_letter(column[0].column)
-                for cell in column:
+                
+                for row_idx, cell in enumerate(column, 1):
                     try:
                         if cell.value:
-                            max_length = max(max_length, len(str(cell.value)))
+                            # Format based on data type
+                            if isinstance(cell.value, (datetime, pd.Timestamp)):
+                                cell.number_format = 'yyyy-mm-dd hh:mm:ss' if hasattr(cell.value, 'time') and cell.value.time() else 'yyyy-mm-dd'
+                                cell.alignment = Alignment(horizontal="center")
+                            elif isinstance(cell.value, (int, float)):
+                                if isinstance(cell.value, float):
+                                    cell.number_format = '#,##0.00'
+                                else:
+                                    cell.number_format = '#,##0'
+                                cell.alignment = Alignment(horizontal="right")
+                            elif isinstance(cell.value, str):
+                                cell.alignment = Alignment(horizontal="left")
+                            
+                            # Update max length for column width
+                            cell_length = len(str(cell.value))
+                            if row_idx == 1:  # Header
+                                cell_length = max(cell_length, len(str(cell.value)))
+                            max_length = max(max_length, cell_length)
                     except:
                         pass
-                worksheet.column_dimensions[column_letter].width = min(max_length + 2, 50)
-            continue
-        
-        # Format header row
-        header_font = Font(bold=True, color="FFFFFF")
-        header_fill = PatternFill(start_color="4CAF50", end_color="4CAF50", fill_type="solid")
-        header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        
-        for cell in worksheet[1]:
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.alignment = header_alignment
-        
-        # Auto-fit columns and format data
-        for column in worksheet.columns:
-            max_length = 0
-            column_letter = get_column_letter(column[0].column)
+                
+                # Set column width (with min and max limits)
+                adjusted_width = min(max(max_length + 2, 8), 50)
+                worksheet.column_dimensions[column_letter].width = adjusted_width
             
-            for row_idx, cell in enumerate(column, 1):
-                try:
-                    if cell.value:
-                        # Format based on data type
-                        if isinstance(cell.value, (datetime, pd.Timestamp)):
-                            cell.number_format = 'yyyy-mm-dd hh:mm:ss' if cell.value.time() else 'yyyy-mm-dd'
-                            cell.alignment = Alignment(horizontal="center")
-                        elif isinstance(cell.value, (int, float)):
-                            if isinstance(cell.value, float):
-                                cell.number_format = '#,##0.00'
-                            else:
-                                cell.number_format = '#,##0'
-                            cell.alignment = Alignment(horizontal="right")
-                        elif isinstance(cell.value, str):
-                            cell.alignment = Alignment(horizontal="left")
-                        
-                        # Update max length for column width
-                        cell_length = len(str(cell.value))
-                        if row_idx == 1:  # Header
-                            cell_length = max(cell_length, len(str(cell.value)))
-                        max_length = max(max_length, cell_length)
-                except:
-                    pass
+            # Add borders
+            thin_border = Border(
+                left=Side(style='thin'),
+                right=Side(style='thin'),
+                top=Side(style='thin'),
+                bottom=Side(style='thin')
+            )
             
-            # Set column width (with min and max limits)
-            adjusted_width = min(max(max_length + 2, 8), 50)
-            worksheet.column_dimensions[column_letter].width = adjusted_width
-        
-        # Add borders
-        thin_border = Border(
-            left=Side(style='thin'),
-            right=Side(style='thin'),
-            top=Side(style='thin'),
-            bottom=Side(style='thin')
-        )
-        
-        for row in worksheet.iter_rows():
-            for cell in row:
-                cell.border = thin_border
+            for row in worksheet.iter_rows():
+                for cell in row:
+                    cell.border = thin_border
+    except:
+        pass
 
 def export_to_excel(tables_to_export: List[Dict], 
                    export_mode: str, 
@@ -1785,7 +829,7 @@ def export_to_excel(tables_to_export: List[Dict],
                         'File Name', 'File Type', 'Total Pages', 
                         'Tables Found', 'Tables Exported', 'Total Rows Exported',
                         'Export Date', 'Extraction Mode', 'OCR Language',
-                        'Data Cleaning', 'Pattern Detection Confidence'
+                        'Data Cleaning'
                     ],
                     'Value': [
                         metadata['file_name'],
@@ -1797,8 +841,7 @@ def export_to_excel(tables_to_export: List[Dict],
                         pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'),
                         st.session_state.extraction_mode,
                         st.session_state.ocr_language if 'ocr_language' in st.session_state else 'N/A',
-                        "Yes",
-                        f"{st.session_state.get('pattern_confidence', {}).get('overall', 0):.1%}"
+                        "Yes"
                     ]
                 })
                 metadata_df.to_excel(writer, sheet_name='Metadata', index=False)
@@ -1949,7 +992,7 @@ def render_sidebar():
             - PDF (digital & scanned)
             - Images (PNG, JPG, JPEG, TIFF, BMP, GIF, WebP)
             
-            **Version:** 3.0.0 (Pattern Detection)
+            **Version:** 3.1.0 (Stable)
             """)
         
         return uploaded_file
@@ -1994,7 +1037,7 @@ def render_document_info():
     
     st.markdown("---")
 
-def render_extraction_settings() -> Tuple[str, bool, int, int, List[int], str, int, bool, float]:
+def render_extraction_settings() -> Tuple[str, bool, int, int, List[int], str, bool]:
     """Render extraction settings and return configuration"""
     st.header("🎯 Extraction Settings")
     
@@ -2004,23 +1047,21 @@ def render_extraction_settings() -> Tuple[str, bool, int, int, List[int], str, i
         extraction_mode = st.selectbox(
             "Extraction Mode",
             options=[
-                "Auto-detect (Any Rows/Columns) - Recommended",
-                "Pattern Detection (Images/Scans)",
-                "Traditional Tables (PDF only)",
-                "Text-based (Fallback)",
-                "All Methods (Slow but thorough)"
+                "Auto-detect (Recommended)",
+                "PDF Tables Only",
+                "OCR Only (Images/Scans)",
+                "All Methods"
             ],
             index=0,
-            help="Choose how to detect rows and columns in your document"
+            help="Choose how to extract data from your document"
         )
         
         # Map selection to mode string
         mode_map = {
-            "Auto-detect (Any Rows/Columns) - Recommended": "Auto-detect (Any Rows/Columns)",
-            "Pattern Detection (Images/Scans)": "Pattern Detection",
-            "Traditional Tables (PDF only)": "Traditional Tables",
-            "Text-based (Fallback)": "Text-based",
-            "All Methods (Slow but thorough)": "All Methods"
+            "Auto-detect (Recommended)": "Auto-detect",
+            "PDF Tables Only": "PDF Tables",
+            "OCR Only (Images/Scans)": "OCR Only",
+            "All Methods": "All Methods"
         }
         st.session_state.extraction_mode = mode_map[extraction_mode]
     
@@ -2063,7 +1104,7 @@ def render_extraction_settings() -> Tuple[str, bool, int, int, List[int], str, i
         else:
             st.info(f"📋 Will scan all {total_pages} pages")
     
-    # Advanced options
+    # Basic settings
     with st.expander("⚙️ Advanced Settings", expanded=False):
         col1, col2 = st.columns(2)
         
@@ -2079,31 +1120,19 @@ def render_extraction_settings() -> Tuple[str, bool, int, int, List[int], str, i
                 2, 50, 2,
                 help="Minimum number of columns to consider as a valid table"
             )
-            
-            min_confidence = st.slider(
-                "Minimum confidence", 
-                0.0, 1.0, 0.3, 0.05,
-                help="Minimum confidence level for pattern detection (lower = more regions, higher = more accurate)"
-            )
         
         with col2:
-            ocr_confidence = st.slider(
-                "OCR Confidence (%)", 
-                0, 100, 30,
-                help="Higher values mean more accurate but fewer results"
+            ocr_lang = st.selectbox(
+                "OCR Language",
+                options=['eng', 'fra', 'deu', 'spa', 'ita', 'por'],
+                index=0,
+                help="Select language for OCR"
             )
             
             enhance_handwriting = st.checkbox("Enhance image", value=True,
                                              help="Apply additional preprocessing for better OCR")
-            
-            ocr_lang = st.selectbox(
-                "OCR Language",
-                options=['eng', 'fra', 'deu', 'spa', 'ita', 'por', 'rus', 'chi_sim', 'jpn', 'kor'],
-                index=0,
-                help="Select language for OCR"
-            )
     
-    return extraction_mode, debug_mode, min_rows, min_cols, selected_pages, ocr_lang, ocr_confidence, enhance_handwriting, min_confidence
+    return extraction_mode, debug_mode, min_rows, min_cols, selected_pages, ocr_lang, enhance_handwriting
 
 def render_table_selection():
     """Render table selection interface"""
@@ -2162,18 +1191,6 @@ def render_table_selection():
         </div>
         """, unsafe_allow_html=True)
     
-    # Show pattern detection confidence if available
-    if st.session_state.get('detected_regions'):
-        overall_confidence = np.mean([r.get('confidence', 0) for r in st.session_state.detected_regions.values()])
-        st.session_state.pattern_confidence = {'overall': overall_confidence}
-        
-        st.markdown(f"""
-        <div class="info-box">
-        <strong>🔍 Pattern Detection Confidence:</strong> {overall_confidence:.1%}<br>
-        <small>Higher confidence means more reliable row/column detection</small>
-        </div>
-        """, unsafe_allow_html=True)
-    
     # Table browser
     pages_with_tables = sorted(st.session_state.tables_data.keys())
     
@@ -2189,11 +1206,6 @@ def render_table_tabs(pages_with_tables: List[int]):
     for tab_idx, (page_num, tab) in enumerate(zip(pages_with_tables, tabs)):
         with tab:
             tables_on_page = st.session_state.tables_data[page_num]
-            
-            # Show detected regions for this page if in debug mode
-            if st.session_state.debug_mode and st.session_state.get('detected_regions', {}).get(page_num):
-                detection = st.session_state.detected_regions[page_num]
-                st.markdown(f"**Detection Info:** {detection['region_count']} regions, {detection['methods_used']}")
             
             for table_idx, table in enumerate(tables_on_page):
                 # Find table ID
@@ -2372,13 +1384,6 @@ def render_export_section(uploaded_file):
             ["Each table → Separate sheet", "Combine all → One sheet", "Group by page"],
             horizontal=True
         )
-        
-        # Column naming options
-        st.markdown("**Column Options:**")
-        rename_columns = st.checkbox("Use smart column names", value=True, 
-                                     help="Rename columns based on detected patterns")
-        preserve_original = st.checkbox("Keep original column names", value=False,
-                                       help="Keep the original column names as found in the document")
     
     with col2:
         include_metadata = st.checkbox("Include metadata sheet", value=True,
@@ -2388,8 +1393,6 @@ def render_export_section(uploaded_file):
         
         # Data cleaning options
         st.markdown("**Data Cleaning:**")
-        remove_duplicates = st.checkbox("Remove duplicate rows", value=False,
-                                       help="Remove duplicate rows from each table")
         remove_empty = st.checkbox("Remove empty rows", value=True,
                                   help="Remove rows that are completely empty")
         strip_whitespace = st.checkbox("Strip whitespace", value=True,
@@ -2398,8 +1401,7 @@ def render_export_section(uploaded_file):
     # Export button
     if st.button("📥 Generate Excel File", type="primary", use_container_width=True):
         tables_to_export, export_summary = prepare_tables_for_export(
-            remove_duplicates, remove_empty, strip_whitespace, 
-            rename_columns, preserve_original
+            remove_empty, strip_whitespace
         )
         
         if not tables_to_export:
@@ -2446,9 +1448,7 @@ def render_export_section(uploaded_file):
                         use_container_width=True
                     )
 
-def prepare_tables_for_export(remove_duplicates: bool, remove_empty: bool, 
-                             strip_whitespace: bool, rename_columns: bool,
-                             preserve_original: bool) -> Tuple[List[Dict], List[Dict]]:
+def prepare_tables_for_export(remove_empty: bool, strip_whitespace: bool) -> Tuple[List[Dict], List[Dict]]:
     """Prepare tables for export with filtering and cleaning"""
     tables_to_export = []
     export_summary = []
@@ -2458,8 +1458,7 @@ def prepare_tables_for_export(remove_duplicates: bool, remove_empty: bool,
             df = table_info.get("df")
             if df is not None:
                 filtered_df = filter_and_clean_table(
-                    df, table_id, remove_duplicates, remove_empty, 
-                    strip_whitespace, rename_columns, preserve_original
+                    df, table_id, remove_empty, strip_whitespace
                 )
                 
                 if not filtered_df.empty:
@@ -2483,9 +1482,7 @@ def prepare_tables_for_export(remove_duplicates: bool, remove_empty: bool,
     return tables_to_export, export_summary
 
 def filter_and_clean_table(df: pd.DataFrame, table_id: str, 
-                          remove_duplicates: bool, remove_empty: bool,
-                          strip_whitespace: bool, rename_columns: bool,
-                          preserve_original: bool) -> pd.DataFrame:
+                          remove_empty: bool, strip_whitespace: bool) -> pd.DataFrame:
     """Apply filtering and cleaning to a single table"""
     # Apply column selection
     selected_cols = [
@@ -2517,69 +1514,10 @@ def filter_and_clean_table(df: pd.DataFrame, table_id: str,
         filtered_df = filtered_df.replace(r'^\s*$', np.nan, regex=True)
         filtered_df = filtered_df.dropna(how='all')
     
-    if remove_duplicates:
-        filtered_df = filtered_df.drop_duplicates()
-    
-    # Rename columns if requested
-    if rename_columns and not filtered_df.empty:
-        filtered_df = rename_columns_smartly(filtered_df)
-    elif not preserve_original:
-        filtered_df = clean_column_names(filtered_df)
-    
     # Convert to proper data types for Excel
     filtered_df = convert_to_proper_types(filtered_df)
     
     return filtered_df
-
-def rename_columns_smartly(df: pd.DataFrame) -> pd.DataFrame:
-    """Rename columns based on detected patterns"""
-    column_analysis = analyze_columns_for_patterns(df)
-    new_columns = []
-    
-    for col in df.columns:
-        if column_analysis.get(col) and column_analysis[col]:
-            # Use first detected pattern
-            new_name = column_analysis[col][0].title()
-            # Add index if duplicate
-            if new_name in new_columns:
-                counter = 2
-                while f"{new_name}_{counter}" in new_columns:
-                    counter += 1
-                new_name = f"{new_name}_{counter}"
-            new_columns.append(new_name)
-        else:
-            # Keep original but clean it
-            new_name = str(col).strip()
-            if new_name in new_columns:
-                counter = 2
-                while f"{new_name}_{counter}" in new_columns:
-                    counter += 1
-                new_name = f"{new_name}_{counter}"
-            new_columns.append(new_name)
-    
-    df.columns = new_columns
-    return df
-
-def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
-    """Clean column names by removing special characters"""
-    new_columns = []
-    for col in df.columns:
-        # Remove special characters and clean
-        clean_col = re.sub(r'[^\w\s]', '', str(col))
-        clean_col = clean_col.strip().replace(' ', '_')
-        if not clean_col:
-            clean_col = f"Column_{len(new_columns)+1}"
-        
-        # Handle duplicates
-        if clean_col in new_columns:
-            counter = 2
-            while f"{clean_col}_{counter}" in new_columns:
-                counter += 1
-            clean_col = f"{clean_col}_{counter}"
-        new_columns.append(clean_col)
-    
-    df.columns = new_columns
-    return df
 
 def render_welcome_screen():
     """Render welcome screen when no document is uploaded"""
@@ -2631,7 +1569,7 @@ def render_welcome_screen():
         <div class="feature-card">
             <div class="feature-icon">🎯</div>
             <div class="feature-title">Multi-Method Detection</div>
-            <div class="feature-description">Uses grid detection, text alignment, line clustering, and density analysis</div>
+            <div class="feature-description">Uses multiple extraction methods for best results</div>
         </div>
         
         <div class="feature-card">
@@ -2682,11 +1620,9 @@ def render_welcome_screen():
     with st.expander("💡 Tips for Best Results", expanded=False):
         st.markdown("""
         - **For clear tables**: Use "Auto-detect" mode for fastest extraction
-        - **For handwritten forms**: Enable image enhancement and adjust OCR confidence
-        - **For complex layouts**: Use "All Methods" for thorough detection
-        - **For better accuracy**: Use high-quality scans (300 DPI or higher)
-        - **For photos of documents**: Ensure good lighting and straight angle
-        - **For forms without lines**: Pattern Detection mode works best
+        - **For handwritten forms**: Use "OCR Only" mode
+        - **For scanned documents**: Ensure good lighting and straight angle
+        - **For forms without lines**: Pattern detection works best
         """)
     
     st.markdown("---")
@@ -2699,8 +1635,8 @@ def render_footer():
         """
         <div style='text-align: center; color: #6c757d; padding: 20px;'>
             <p style='font-size: 14px;'>
-                <strong>Advanced Document to Excel Converter</strong> • Version 3.0.0<br>
-                Built with Streamlit, OpenCV, Tesseract OCR, scikit-learn, and pdfplumber<br>
+                <strong>Advanced Document to Excel Converter</strong> • Version 3.1.0<br>
+                Built with Streamlit, OpenCV, Tesseract OCR, and pdfplumber<br>
                 © 2024 - Extract any rows & columns from any document
             </p>
         </div>
@@ -2729,12 +1665,22 @@ def main():
     # Render sidebar and get uploaded file
     uploaded_file = render_sidebar()
     
+    # Show availability warnings if needed
+    if not st.session_state.cv_available:
+        st.sidebar.warning("⚠️ OpenCV not installed. Image processing features limited.")
+    
+    if not st.session_state.pdf_available:
+        st.sidebar.warning("⚠️ PDF libraries not fully installed. PDF extraction limited.")
+    
+    if not st.session_state.ml_available:
+        st.sidebar.info("ℹ️ Using simplified pattern detection (scikit-learn not available)")
+    
     # Main content
     if st.session_state.pdf_uploaded and uploaded_file:
         render_document_info()
         
         # Get extraction settings
-        extraction_mode, debug_mode, min_rows, min_cols, selected_pages, ocr_lang, ocr_confidence, enhance_handwriting, min_confidence = render_extraction_settings()
+        extraction_mode, debug_mode, min_rows, min_cols, selected_pages, ocr_lang, enhance_handwriting = render_extraction_settings()
         
         # Extract button
         if selected_pages and st.button("🔍 Extract Data", type="primary", use_container_width=True):
@@ -2752,14 +1698,11 @@ def main():
                     status_text.text("Processing document...")
                     progress_bar.progress(20)
                     
-                    # Extract using enhanced pattern detection
-                    tables_by_page = extract_any_pattern_from_document(
+                    # Extract tables
+                    tables_by_page = extract_tables_from_document(
                         file_path, 
                         selected_pages, 
-                        st.session_state.extraction_mode,
-                        ocr_lang=ocr_lang,
-                        min_confidence=min_confidence,
-                        enhance=enhance_handwriting
+                        st.session_state.extraction_mode
                     )
                     
                     progress_bar.progress(60)
@@ -2802,10 +1745,8 @@ def main():
                                 },
                                 'ocr_settings': {
                                     'language': ocr_lang,
-                                    'confidence': ocr_confidence,
                                     'enhance_handwriting': enhance_handwriting
-                                },
-                                'detection_confidence': st.session_state.get('pattern_confidence', {})
+                                }
                             })
                     
                 except Exception as e:
