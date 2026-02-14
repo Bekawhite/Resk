@@ -2,6 +2,7 @@
 Advanced PDF Table & Data Extractor
 Supports: Digital PDFs, Scanned Documents, Handwritten Text, Images
 Extracts ANY tabular data (rows & columns) from any document type
+Specialized for Bank Statements and Financial Documents
 """
 
 import streamlit as st
@@ -307,7 +308,7 @@ def init_session_states():
         'column_selections': {},
         'row_selections': {},
         'all_columns': {},
-        'extraction_mode': "Auto-detect (Any Rows/Columns)",
+        'extraction_mode': "Bank Statement",
         'processing_history': [],
         'current_file_hash': None,
         'extraction_stats': {},
@@ -317,7 +318,8 @@ def init_session_states():
         'pattern_confidence': {},
         'cv_available': CV_AVAILABLE,
         'ml_available': SKLEARN_AVAILABLE and SCIPY_AVAILABLE,
-        'pdf_available': PDFPLUMBER_AVAILABLE or CAMELOT_AVAILABLE
+        'pdf_available': PDFPLUMBER_AVAILABLE or CAMELOT_AVAILABLE,
+        'tesseract_available': TESSERACT_AVAILABLE
     }
     
     for key, value in defaults.items():
@@ -442,6 +444,337 @@ def calculate_extraction_stats(tables_data: Dict) -> Dict:
     return stats
 
 # ============================================================================
+# ENHANCED BANK STATEMENT EXTRACTION FUNCTIONS
+# ============================================================================
+
+def extract_bank_statement_pattern(text_lines: List[str]) -> List[pd.DataFrame]:
+    """
+    Specifically designed to extract bank statement transaction data
+    Handles the format: Date | Value Date | Reference | Description | Debit | Credit | Balance
+    """
+    transactions = []
+    current_transaction = []
+    headers_detected = False
+    header_patterns = ['date', 'value date', 'ref', 'description', 'debit', 'credit', 'balance', 
+                       'transaction', 'particulars', 'withdrawal', 'deposit', 'amount']
+    
+    # First pass: try to identify the header row
+    header_row_index = -1
+    for i, line in enumerate(text_lines):
+        line_lower = line.lower().strip()
+        header_matches = sum(1 for pattern in header_patterns if pattern in line_lower)
+        if header_matches >= 2:  # If we find at least 2 header keywords
+            headers_detected = True
+            header_row_index = i
+            break
+    
+    # Second pass: extract transactions
+    for i, line in enumerate(text_lines):
+        if i <= header_row_index:  # Skip header and above
+            continue
+            
+        line = line.strip()
+        if not line:
+            continue
+            
+        # Check if line contains transaction data (has date pattern and amounts)
+        date_pattern = r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}'  # DD/MM/YYYY or DD-MM-YYYY
+        amount_pattern = r'[\d,]+\.\d{2}'  # Amounts with decimals
+        ugx_pattern = r'UGX\s*[\d,]+\.\d{2}'  # UGX amount pattern
+        
+        has_date = re.search(date_pattern, line)
+        has_amount = re.search(amount_pattern, line) or re.search(ugx_pattern, line)
+        
+        if has_date and has_amount:
+            # This is likely a transaction line
+            if current_transaction:
+                # Process the accumulated transaction
+                processed = process_transaction_line(' '.join(current_transaction))
+                if processed:
+                    transactions.append(processed)
+                current_transaction = []
+            current_transaction = [line]
+        elif current_transaction and line:
+            # Continuation of previous transaction (multi-line description)
+            current_transaction.append(line)
+        elif not current_transaction and has_amount:
+            # Some statements might not have dates in every line
+            current_transaction = [line]
+    
+    # Don't forget the last transaction
+    if current_transaction:
+        processed = process_transaction_line(' '.join(current_transaction))
+        if processed:
+            transactions.append(processed)
+    
+    # Convert to DataFrame
+    if transactions:
+        df = pd.DataFrame(transactions)
+        # Try to split into proper columns
+        df = split_transaction_columns(df)
+        return [df] if not df.empty else []
+    
+    return []
+
+def process_transaction_line(line: str) -> Dict:
+    """
+    Process a single transaction line and extract components
+    """
+    transaction = {
+        'raw_text': line,
+        'date': '',
+        'value_date': '',
+        'reference': '',
+        'description': '',
+        'debit': '',
+        'credit': '',
+        'balance': ''
+    }
+    
+    # Extract date patterns
+    date_pattern = r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})'
+    dates = re.findall(date_pattern, line)
+    
+    if len(dates) >= 1:
+        transaction['date'] = dates[0]
+    if len(dates) >= 2:
+        transaction['value_date'] = dates[1]
+    
+    # Extract UGX amounts
+    ugx_pattern = r'UGX\s*([\d,]+\.\d{2})'
+    ugx_matches = re.findall(ugx_pattern, line)
+    
+    # Extract regular amounts
+    amount_pattern = r'([\d,]+\.\d{2})'
+    amounts = re.findall(amount_pattern, line)
+    
+    # Combine and clean amounts
+    all_amounts = ugx_matches + amounts
+    all_amounts = [amt.replace(',', '') for amt in all_amounts]
+    
+    # Bank statements typically have 2-3 amounts: debit/credit + balance
+    if len(all_amounts) >= 2:
+        # Check for debit/credit indicators
+        if 'dr' in line.lower() or 'debit' in line.lower() or 'withdrawal' in line.lower():
+            transaction['debit'] = all_amounts[0]
+            if len(all_amounts) > 1:
+                transaction['balance'] = all_amounts[-1]
+        elif 'cr' in line.lower() or 'credit' in line.lower() or 'deposit' in line.lower():
+            transaction['credit'] = all_amounts[0]
+            if len(all_amounts) > 1:
+                transaction['balance'] = all_amounts[-1]
+        else:
+            # Try to guess based on typical format
+            if len(all_amounts) == 2:
+                # Assume first is amount, second is balance
+                # Try to determine if it's debit or credit from context
+                if float(all_amounts[0]) > 0:
+                    # Could be either, but we'll put in debit by default
+                    transaction['debit'] = all_amounts[0]
+                transaction['balance'] = all_amounts[1]
+            elif len(all_amounts) >= 3:
+                transaction['debit'] = all_amounts[0]
+                transaction['credit'] = all_amounts[1]
+                transaction['balance'] = all_amounts[-1]
+    
+    # Extract reference number (if present)
+    ref_pattern = r'([A-Z0-9]{8,})'  # Alphanumeric code of 8+ characters
+    refs = re.findall(ref_pattern, line)
+    if refs and not any(word in line.lower() for word in ['ugx', 'date']):
+        transaction['reference'] = refs[0]
+    
+    # Extract description (everything between dates and amounts)
+    description = line
+    # Remove dates
+    for date in dates:
+        description = description.replace(date, '')
+    # Remove amounts and UGX
+    for amt in ugx_matches + amounts:
+        description = description.replace(amt, '')
+    description = re.sub(r'UGX', '', description, flags=re.IGNORECASE)
+    # Clean up
+    description = re.sub(r'\s+', ' ', description).strip()
+    # Remove common transaction codes and indicators
+    description = re.sub(r'\b(dr|cr|debit|credit|withdrawal|deposit)\b', '', description, flags=re.IGNORECASE).strip()
+    # Remove reference numbers
+    for ref in refs:
+        description = description.replace(ref, '')
+    description = re.sub(r'\s+', ' ', description).strip()
+    
+    transaction['description'] = description if description else 'No Description'
+    
+    return transaction
+
+def split_transaction_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Attempt to split the raw text into proper columns
+    """
+    if df.empty:
+        return df
+    
+    # Create a new DataFrame with proper columns
+    structured_data = []
+    
+    for _, row in df.iterrows():
+        transaction = row['raw_text']
+        
+        # Try to split by multiple spaces (typical in bank statements)
+        parts = re.split(r'\s{2,}', transaction)
+        
+        if len(parts) >= 3:  # At least date, description, amount
+            structured_row = {
+                'Date': '',
+                'Value Date': '',
+                'Reference': '',
+                'Description': '',
+                'Debit': '',
+                'Credit': '',
+                'Balance': ''
+            }
+            
+            # First part is usually date
+            if parts and re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}', parts[0]):
+                structured_row['Date'] = parts[0]
+            
+            # Last part is usually balance
+            if parts and re.search(r'[\d,]+\.\d{2}', parts[-1]):
+                structured_row['Balance'] = parts[-1]
+            
+            # Second last is usually amount
+            if len(parts) >= 2 and re.search(r'[\d,]+\.\d{2}', parts[-2]):
+                amount = parts[-2]
+                
+                # Check if it's debit or credit
+                if 'dr' in transaction.lower() or 'debit' in transaction.lower():
+                    structured_row['Debit'] = amount
+                elif 'cr' in transaction.lower() or 'credit' in transaction.lower():
+                    structured_row['Credit'] = amount
+                else:
+                    # Try to determine by position or context
+                    if len(parts) >= 3:
+                        structured_row['Debit'] = amount
+            
+            # Everything in between is description and reference
+            if len(parts) > 3:
+                desc_parts = parts[1:-2]
+                # Check for reference in description
+                for part in desc_parts:
+                    if re.search(r'[A-Z0-9]{8,}', part):
+                        structured_row['Reference'] = part
+                        desc_parts.remove(part)
+                structured_row['Description'] = ' '.join(desc_parts).strip()
+            elif len(parts) > 2:
+                structured_row['Description'] = parts[1]
+            
+            structured_data.append(structured_row)
+    
+    if structured_data:
+        result_df = pd.DataFrame(structured_data)
+        # Remove empty columns
+        result_df = result_df.loc[:, (result_df != '').any(axis=0)]
+        return result_df
+    
+    # If splitting fails, return original with basic parsing
+    result_df = df.copy()
+    if 'date' in result_df.columns:
+        result_df['Date'] = result_df['date']
+    if 'description' in result_df.columns:
+        result_df['Description'] = result_df['description']
+    if 'debit' in result_df.columns:
+        result_df['Debit'] = result_df['debit']
+    if 'credit' in result_df.columns:
+        result_df['Credit'] = result_df['credit']
+    if 'balance' in result_df.columns:
+        result_df['Balance'] = result_df['balance']
+    
+    # Select only the standard columns that exist
+    standard_cols = ['Date', 'Value Date', 'Reference', 'Description', 'Debit', 'Credit', 'Balance']
+    existing_cols = [col for col in standard_cols if col in result_df.columns]
+    
+    return result_df[existing_cols] if existing_cols else result_df
+
+# ============================================================================
+# ENHANCED OCR EXTRACTION FOR BANK STATEMENTS
+# ============================================================================
+
+def enhanced_bank_statement_ocr(image):
+    """
+    Enhanced OCR specifically for bank statements
+    """
+    if not TESSERACT_AVAILABLE:
+        return []
+    
+    try:
+        # Preprocess image for better OCR
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image.copy()
+        
+        # Enhance image for better text recognition
+        # Apply adaptive thresholding
+        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                      cv2.THRESH_BINARY, 11, 2)
+        
+        # Remove noise
+        denoised = cv2.fastNlMeansDenoising(thresh, None, 10, 7, 21)
+        
+        # Increase contrast
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        enhanced = clahe.apply(denoised)
+        
+        # Additional preprocessing for bank statements
+        # Detect and enhance table lines
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
+        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
+        
+        horizontal_lines = cv2.morphologyEx(enhanced, cv2.MORPH_OPEN, horizontal_kernel)
+        vertical_lines = cv2.morphologyEx(enhanced, cv2.MORPH_OPEN, vertical_kernel)
+        
+        table_structure = cv2.add(horizontal_lines, vertical_lines)
+        enhanced = cv2.add(enhanced, table_structure)
+        
+        # Custom OCR configuration for bank statements
+        custom_config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,/-:UGX '
+        
+        # Get OCR data
+        data = pytesseract.image_to_data(enhanced, config=custom_config, output_type=pytesseract.Output.DICT)
+        
+        # Group by line and sort by vertical position
+        lines = {}
+        for i in range(len(data['text'])):
+            if int(data['conf'][i]) > 30:  # Confidence threshold
+                text = data['text'][i].strip()
+                if text:
+                    line_num = data['line_num'][i]
+                    if line_num not in lines:
+                        lines[line_num] = []
+                    lines[line_num].append({
+                        'text': text,
+                        'x': data['left'][i],
+                        'conf': data['conf'][i]
+                    })
+        
+        # Sort words in each line by x-coordinate
+        sorted_lines = []
+        for line_num in sorted(lines.keys()):
+            words = lines[line_num]
+            words.sort(key=lambda x: x['x'])
+            line_text = ' '.join([word['text'] for word in words])
+            if line_text.strip():
+                sorted_lines.append(line_text)
+        
+        # Use bank statement specific extraction
+        tables = extract_bank_statement_pattern(sorted_lines)
+        
+        return tables
+        
+    except Exception as e:
+        if st.session_state.debug_mode:
+            st.warning(f"Enhanced OCR error: {e}")
+        return []
+
+# ============================================================================
 # SIMPLIFIED PATTERN DETECTION (WITHOUT HEAVY ML DEPENDENCIES)
 # ============================================================================
 
@@ -547,6 +880,8 @@ def extract_pdf_tables(pdf_path: str, page_num: int) -> List[pd.DataFrame]:
             with pdfplumber.open(pdf_path) as pdf:
                 if page_num <= len(pdf.pages):
                     page = pdf.pages[page_num - 1]
+                    
+                    # Try table extraction
                     page_tables = page.extract_tables()
                     
                     for table_data in page_tables:
@@ -557,6 +892,14 @@ def extract_pdf_tables(pdf_path: str, page_num: int) -> List[pd.DataFrame]:
                             
                             if not df.empty and len(df) > 1:
                                 tables.append(df)
+                    
+                    # If no tables found, try text extraction and parse as bank statement
+                    if not tables:
+                        text = page.extract_text()
+                        if text:
+                            lines = text.split('\n')
+                            bank_tables = extract_bank_statement_pattern(lines)
+                            tables.extend(bank_tables)
         except Exception as e:
             pass
     
@@ -586,7 +929,7 @@ def extract_pdf_tables(pdf_path: str, page_num: int) -> List[pd.DataFrame]:
 
 def extract_tables_from_document(file_path: str, pages: List[int], mode: str) -> Dict[int, List[pd.DataFrame]]:
     """
-    Main extraction function that handles different document types
+    Enhanced extraction function with bank statement support
     """
     tables_by_page = {}
     file_ext = file_path.split('.')[-1].lower()
@@ -598,15 +941,33 @@ def extract_tables_from_document(file_path: str, pages: List[int], mode: str) ->
         if file_ext == 'pdf':
             # Try PDF extraction methods
             pdf_tables = extract_pdf_tables(file_path, page_num)
+            
+            # If standard extraction fails or returns few tables, try bank statement specific
+            if not pdf_tables or (pdf_tables and len(pdf_tables[0]) < 3):
+                # Try to extract text and parse as bank statement
+                if PDFPLUMBER_AVAILABLE:
+                    try:
+                        with pdfplumber.open(file_path) as pdf:
+                            if page_num <= len(pdf.pages):
+                                page = pdf.pages[page_num - 1]
+                                text = page.extract_text()
+                                if text:
+                                    lines = text.split('\n')
+                                    bank_tables = extract_bank_statement_pattern(lines)
+                                    page_tables.extend(bank_tables)
+                    except Exception as e:
+                        if st.session_state.debug_mode:
+                            st.warning(f"Text extraction error: {e}")
+            
             page_tables.extend(pdf_tables)
         
-        # For images or scanned PDFs, try OCR
-        if not page_tables and TESSERACT_AVAILABLE:
+        # For images or scanned PDFs, use enhanced OCR
+        if (not page_tables or (page_tables and len(page_tables[0]) < 3)) and TESSERACT_AVAILABLE:
             try:
                 # Convert PDF page to image if needed
                 if file_ext == 'pdf' and PDF2IMAGE_AVAILABLE:
                     images = pdf2image.convert_from_path(file_path, first_page=page_num, 
-                                                        last_page=page_num, dpi=200)
+                                                        last_page=page_num, dpi=300)  # Higher DPI for better OCR
                     if images:
                         image = np.array(images[0])
                 else:
@@ -617,30 +978,46 @@ def extract_tables_from_document(file_path: str, pages: List[int], mode: str) ->
                         image = cv2.imread(file_path)
                 
                 if image is not None:
-                    # Simple pattern detection
-                    regions = simple_pattern_detection(image)
+                    # Try enhanced bank statement OCR first
+                    if mode == "Bank Statement" or mode == "All Methods":
+                        bank_tables = enhanced_bank_statement_ocr(image)
+                        page_tables.extend(bank_tables)
                     
-                    if regions:
-                        for region in regions:
-                            # Extract region
-                            x, y, w, h = region['x'], region['y'], region['width'], region['height']
-                            roi = image[y:y+h, x:x+w]
-                            
-                            # OCR the region
-                            ocr_tables = basic_ocr_extraction(roi)
-                            page_tables.extend(ocr_tables)
-                    
-                    # If no regions found, try OCR on whole image
+                    # If still no tables, try basic OCR
                     if not page_tables:
-                        ocr_tables = basic_ocr_extraction(image)
-                        page_tables.extend(ocr_tables)
+                        # Simple pattern detection
+                        regions = simple_pattern_detection(image)
+                        
+                        if regions:
+                            for region in regions:
+                                # Extract region
+                                x, y, w, h = region['x'], region['y'], region['width'], region['height']
+                                roi = image[y:y+h, x:x+w]
+                                
+                                # OCR the region
+                                ocr_tables = basic_ocr_extraction(roi)
+                                page_tables.extend(ocr_tables)
+                        
+                        # If no regions found, try OCR on whole image
+                        if not page_tables:
+                            ocr_tables = basic_ocr_extraction(image)
+                            page_tables.extend(ocr_tables)
                         
             except Exception as e:
                 if st.session_state.debug_mode:
                     st.warning(f"OCR error on page {page_num}: {e}")
         
-        if page_tables:
-            tables_by_page[page_num] = page_tables
+        # Clean up the tables
+        cleaned_tables = []
+        for table in page_tables:
+            if isinstance(table, pd.DataFrame) and not table.empty:
+                # Remove completely empty rows and columns
+                table = table.replace('', pd.NA).dropna(how='all').dropna(axis=1, how='all')
+                if not table.empty and len(table) >= 2:  # At least 2 rows
+                    cleaned_tables.append(table)
+        
+        if cleaned_tables:
+            tables_by_page[page_num] = cleaned_tables
     
     return tables_by_page
 
@@ -829,7 +1206,7 @@ def export_to_excel(tables_to_export: List[Dict],
                         'File Name', 'File Type', 'Total Pages', 
                         'Tables Found', 'Tables Exported', 'Total Rows Exported',
                         'Export Date', 'Extraction Mode', 'OCR Language',
-                        'Data Cleaning'
+                        'Data Cleaning', 'Bank Statement Mode'
                     ],
                     'Value': [
                         metadata['file_name'],
@@ -841,7 +1218,8 @@ def export_to_excel(tables_to_export: List[Dict],
                         pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'),
                         st.session_state.extraction_mode,
                         st.session_state.ocr_language if 'ocr_language' in st.session_state else 'N/A',
-                        "Yes"
+                        "Yes",
+                        "Yes" if st.session_state.extraction_mode == "Bank Statement" else "No"
                     ]
                 })
                 metadata_df.to_excel(writer, sheet_name='Metadata', index=False)
@@ -926,7 +1304,7 @@ def render_sidebar():
         uploaded_file = st.file_uploader(
             "Choose a file",
             type=['pdf', 'png', 'jpg', 'jpeg', 'tiff', 'bmp', 'gif', 'webp'],
-            help="Upload any document containing rows and columns - tables, forms, lists, etc.",
+            help="Upload any document containing rows and columns - bank statements, tables, forms, lists, etc.",
             key="file_uploader"
         )
         
@@ -980,6 +1358,7 @@ def render_sidebar():
             **Advanced Document to Excel Converter**
             
             **Features:**
+            - Bank Statement optimized extraction
             - Detects ANY rows & columns pattern
             - Digital PDF table extraction
             - Handwritten text recognition
@@ -992,7 +1371,7 @@ def render_sidebar():
             - PDF (digital & scanned)
             - Images (PNG, JPG, JPEG, TIFF, BMP, GIF, WebP)
             
-            **Version:** 3.1.0 (Stable)
+            **Version:** 3.2.0 (Bank Statement Edition)
             """)
         
         return uploaded_file
@@ -1038,7 +1417,7 @@ def render_document_info():
     st.markdown("---")
 
 def render_extraction_settings() -> Tuple[str, bool, int, int, List[int], str, bool]:
-    """Render extraction settings and return configuration"""
+    """Render extraction settings with bank statement option"""
     st.header("🎯 Extraction Settings")
     
     col1, col2 = st.columns([2, 1])
@@ -1047,18 +1426,20 @@ def render_extraction_settings() -> Tuple[str, bool, int, int, List[int], str, b
         extraction_mode = st.selectbox(
             "Extraction Mode",
             options=[
-                "Auto-detect (Recommended)",
+                "Bank Statement Mode (Optimized)",
+                "Auto-detect (General)",
                 "PDF Tables Only",
                 "OCR Only (Images/Scans)",
                 "All Methods"
             ],
-            index=0,
-            help="Choose how to extract data from your document"
+            index=0,  # Default to Bank Statement Mode
+            help="Bank Statement Mode is optimized for financial statements with date, description, debit, credit, balance columns."
         )
         
         # Map selection to mode string
         mode_map = {
-            "Auto-detect (Recommended)": "Auto-detect",
+            "Bank Statement Mode (Optimized)": "Bank Statement",
+            "Auto-detect (General)": "Auto-detect",
             "PDF Tables Only": "PDF Tables",
             "OCR Only (Images/Scans)": "OCR Only",
             "All Methods": "All Methods"
@@ -1111,13 +1492,13 @@ def render_extraction_settings() -> Tuple[str, bool, int, int, List[int], str, b
         with col1:
             min_rows = st.number_input(
                 "Minimum rows", 
-                2, 1000, 2,
+                2, 1000, 3,  # Lowered to 3 for bank statements
                 help="Minimum number of rows to consider as a valid table"
             )
             
             min_cols = st.number_input(
                 "Minimum columns", 
-                2, 50, 2,
+                2, 50, 3,  # Lowered to 3 for bank statements
                 help="Minimum number of columns to consider as a valid table"
             )
         
@@ -1525,6 +1906,7 @@ def render_welcome_screen():
     <div class="info-box">
     <h1>📊 Advanced Document to Excel Converter</h1>
     <p style='font-size: 18px;'>Extract <strong>ANY rows and columns</strong> from any document type - printed, handwritten, scanned, or digital.</p>
+    <p><strong>Specialized for Bank Statements and Financial Documents</strong></p>
     <p><strong>Supported Formats:</strong> PDF, PNG, JPG, JPEG, TIFF, BMP, GIF, WebP</p>
     </div>
     """, unsafe_allow_html=True)
@@ -1537,15 +1919,15 @@ def render_welcome_screen():
     with col1:
         st.markdown("""
         <div class="feature-card">
-            <div class="feature-icon">🔍</div>
-            <div class="feature-title">Intelligent Pattern Detection</div>
-            <div class="feature-description">Automatically detects any rows & columns pattern - tables, forms, lists, invoices, receipts</div>
+            <div class="feature-icon">🏦</div>
+            <div class="feature-title">Bank Statement Optimized</div>
+            <div class="feature-description">Specialized extraction for financial statements with date, description, debit, credit, and balance columns</div>
         </div>
         
         <div class="feature-card">
-            <div class="feature-icon">🧠</div>
-            <div class="feature-title">Smart Column Detection</div>
-            <div class="feature-description">Identifies debit, credit, date, amount, and other column types automatically</div>
+            <div class="feature-icon">🔍</div>
+            <div class="feature-title">Intelligent Pattern Detection</div>
+            <div class="feature-description">Automatically detects any rows & columns pattern - tables, forms, lists, invoices, receipts</div>
         </div>
         """, unsafe_allow_html=True)
     
@@ -1567,9 +1949,9 @@ def render_welcome_screen():
     with col3:
         st.markdown("""
         <div class="feature-card">
-            <div class="feature-icon">🎯</div>
-            <div class="feature-title">Multi-Method Detection</div>
-            <div class="feature-description">Uses multiple extraction methods for best results</div>
+            <div class="feature-icon">💰</div>
+            <div class="feature-title">Multi-Currency Support</div>
+            <div class="feature-description">Handles UGX, USD, EUR, GBP and other currency formats automatically</div>
         </div>
         
         <div class="feature-card">
@@ -1596,7 +1978,7 @@ def render_welcome_screen():
         st.markdown("""
         <div class="progress-step">
             <div class="step-number">2</div>
-            <div class="step-text">Choose Detection Mode</div>
+            <div class="step-text">Choose Bank Statement Mode</div>
         </div>
         """, unsafe_allow_html=True)
     
@@ -1619,10 +2001,11 @@ def render_welcome_screen():
     # Tips section
     with st.expander("💡 Tips for Best Results", expanded=False):
         st.markdown("""
-        - **For clear tables**: Use "Auto-detect" mode for fastest extraction
+        - **For bank statements**: Use "Bank Statement Mode" for best results
+        - **For clear tables**: Use "Auto-detect" mode for faster extraction
         - **For handwritten forms**: Use "OCR Only" mode
         - **For scanned documents**: Ensure good lighting and straight angle
-        - **For forms without lines**: Pattern detection works best
+        - **For multi-currency statements**: The system automatically detects UGX, USD, EUR formats
         """)
     
     st.markdown("---")
@@ -1635,8 +2018,9 @@ def render_footer():
         """
         <div style='text-align: center; color: #6c757d; padding: 20px;'>
             <p style='font-size: 14px;'>
-                <strong>Advanced Document to Excel Converter</strong> • Version 3.1.0<br>
+                <strong>Advanced Document to Excel Converter</strong> • Version 3.2.0 (Bank Statement Edition)<br>
                 Built with Streamlit, OpenCV, Tesseract OCR, and pdfplumber<br>
+                Specialized for Financial Documents and Bank Statements<br>
                 © 2024 - Extract any rows & columns from any document
             </p>
         </div>
@@ -1672,8 +2056,9 @@ def main():
     if not st.session_state.pdf_available:
         st.sidebar.warning("⚠️ PDF libraries not fully installed. PDF extraction limited.")
     
-    if not st.session_state.ml_available:
-        st.sidebar.info("ℹ️ Using simplified pattern detection (scikit-learn not available)")
+    if not st.session_state.tesseract_available:
+        st.sidebar.warning("⚠️ Tesseract OCR not installed. Text recognition from images limited.")
+        st.sidebar.info("💡 Install Tesseract OCR for better results with scanned documents")
     
     # Main content
     if st.session_state.pdf_uploaded and uploaded_file:
@@ -1681,6 +2066,9 @@ def main():
         
         # Get extraction settings
         extraction_mode, debug_mode, min_rows, min_cols, selected_pages, ocr_lang, enhance_handwriting = render_extraction_settings()
+        
+        # Store OCR language in session state
+        st.session_state.ocr_language = ocr_lang
         
         # Extract button
         if selected_pages and st.button("🔍 Extract Data", type="primary", use_container_width=True):
@@ -1746,6 +2134,12 @@ def main():
                                 'ocr_settings': {
                                     'language': ocr_lang,
                                     'enhance_handwriting': enhance_handwriting
+                                },
+                                'libraries_available': {
+                                    'opencv': st.session_state.cv_available,
+                                    'tesseract': st.session_state.tesseract_available,
+                                    'pdfplumber': PDFPLUMBER_AVAILABLE,
+                                    'camelot': CAMELOT_AVAILABLE
                                 }
                             })
                     
@@ -1854,6 +2248,16 @@ def display_extraction_results(total_tables_found: int, filtered_tables: Dict, t
             """, unsafe_allow_html=True)
     else:
         st.warning(f"⚠️ No data found with at least {min_rows} rows and {min_cols} columns. Try adjusting the minimum requirements or extraction mode.")
+        
+        # Provide suggestions
+        st.info("""
+        **Suggestions:**
+        - Try "Bank Statement Mode" for financial documents
+        - Reduce minimum rows requirement (try 2 or 3)
+        - Enable Debug Mode to see what text is being extracted
+        - Make sure the document is clear and well-lit
+        - For scanned documents, ensure the image is straight and not skewed
+        """)
 
 # ============================================================================
 # ENTRY POINT
