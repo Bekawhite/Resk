@@ -17,8 +17,6 @@ import base64
 import hashlib
 import time
 from collections import defaultdict
-from sklearn.cluster import DBSCAN
-from scipy import stats
 
 # ============================================================================
 # IMPORTS WITH ERROR HANDLING
@@ -52,10 +50,15 @@ except ImportError:
 try:
     from sklearn.cluster import DBSCAN
     from sklearn.preprocessing import StandardScaler
+    from scipy import stats
+    from scipy.signal import find_peaks
     ML_AVAILABLE = True
 except ImportError:
     ML_AVAILABLE = False
-    st.warning("scikit-learn not available. Install for enhanced pattern detection.")
+    st.warning("scikit-learn or scipy not available. Install for enhanced pattern detection.")
+    # Define fallback functions if needed
+    def find_peaks(*args, **kwargs):
+        return [], {}
 
 # ============================================================================
 # PAGE CONFIGURATION
@@ -758,10 +761,21 @@ def detect_content_density_pattern(gray: np.ndarray) -> Tuple[List[Dict], float]
                 horizontal_projection = np.sum(roi, axis=0) / 255
                 
                 # Detect peaks in projections (indicating rows/columns)
-                from scipy.signal import find_peaks
-                
-                vertical_peaks, _ = find_peaks(vertical_projection, distance=10, height=5)
-                horizontal_peaks, _ = find_peaks(horizontal_projection, distance=10, height=5)
+                if ML_AVAILABLE:
+                    from scipy.signal import find_peaks
+                    vertical_peaks, _ = find_peaks(vertical_projection, distance=10, height=5)
+                    horizontal_peaks, _ = find_peaks(horizontal_projection, distance=10, height=5)
+                else:
+                    # Simple peak detection
+                    vertical_peaks = []
+                    for i in range(1, len(vertical_projection)-1):
+                        if vertical_projection[i] > vertical_projection[i-1] and vertical_projection[i] > vertical_projection[i+1] and vertical_projection[i] > 5:
+                            vertical_peaks.append(i)
+                    
+                    horizontal_peaks = []
+                    for i in range(1, len(horizontal_projection)-1):
+                        if horizontal_projection[i] > horizontal_projection[i-1] and horizontal_projection[i] > horizontal_projection[i+1] and horizontal_projection[i] > 5:
+                            horizontal_peaks.append(i)
                 
                 row_count = len(vertical_peaks)
                 col_count = len(horizontal_peaks)
@@ -839,23 +853,32 @@ def detect_contour_regions(gray: np.ndarray) -> Tuple[List[Dict], float]:
             
             # Check column consistency across rows
             col_counts = [len(row) for row in rows]
-            if max(col_counts) >= 2 and stats.mode(col_counts)[0][0] >= 2:
-                # Create region for entire structure
-                all_x = [c[0] for row in rows for c in row]
-                all_y = [c[1] for row in rows for c in row]
-                all_x2 = [c[0] + c[2] for row in rows for c in row]
-                all_y2 = [c[1] + c[3] for row in rows for c in row]
+            if max(col_counts) >= 2:
+                # Find most common column count
+                if ML_AVAILABLE:
+                    common_cols = stats.mode(col_counts)[0][0]
+                else:
+                    # Simple mode calculation
+                    from collections import Counter
+                    common_cols = Counter(col_counts).most_common(1)[0][0]
                 
-                regions.append({
-                    'x': min(all_x) - 10,
-                    'y': min(all_y) - 10,
-                    'width': max(all_x2) - min(all_x) + 20,
-                    'height': max(all_y2) - min(all_y) + 20,
-                    'type': 'contour_grid',
-                    'rows': len(rows),
-                    'columns': stats.mode(col_counts)[0][0],
-                    'confidence': min(1.0, len(valid_contours) / 50)
-                })
+                if common_cols >= 2:
+                    # Create region for entire structure
+                    all_x = [c[0] for row in rows for c in row]
+                    all_y = [c[1] for row in rows for c in row]
+                    all_x2 = [c[0] + c[2] for row in rows for c in row]
+                    all_y2 = [c[1] + c[3] for row in rows for c in row]
+                    
+                    regions.append({
+                        'x': min(all_x) - 10,
+                        'y': min(all_y) - 10,
+                        'width': max(all_x2) - min(all_x) + 20,
+                        'height': max(all_y2) - min(all_y) + 20,
+                        'type': 'contour_grid',
+                        'rows': len(rows),
+                        'columns': common_cols,
+                        'confidence': min(1.0, len(valid_contours) / 50)
+                    })
         
         confidence = max([r.get('confidence', 0) for r in regions]) if regions else 0
         
