@@ -18,6 +18,9 @@ seaborn
 plotly
 altair
 bokeh
+scikit-learn
+Scipy
+
 pyyaml
 python-dotenv
 requests
@@ -164,3 +167,4 @@ paddleocr
 paddlepaddle
 paddlehub
 paddleclas
+
