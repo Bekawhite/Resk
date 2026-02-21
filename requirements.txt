@@ -1,13 +1,15 @@
-streamlit>=1.28.0
 pandas
+streamlit
 numpy
 openpyxl
-pdfplumber
-pillow
+opencv-python
 pytesseract
-opencv-python-headless  # Use headless version for servers
+pillow
 pdf2image
+pdfplumber
+camelot-py
 scikit-learn
 scipy
-camelot-py[cv]  # Include OpenCV dependency
-opencv-python-headless  # For camelot-py[cv]
+spacy
+textblob
+nltk
