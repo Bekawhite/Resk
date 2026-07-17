@@ -164,7 +164,6 @@ def is_table_like(data: List[List[str]]) -> bool:
 def extract_tables_with_pdfplumber(pdf_path: str, pages: List[int]) -> Dict[int, List[pd.DataFrame]]:
     """Extract tables using pdfplumber only - MODIFIED to better detect tables"""
     import pdfplumber
-    from pdfplumber.table import TableSettings
     
     tables_by_page = {}
     
@@ -173,23 +172,28 @@ def extract_tables_with_pdfplumber(pdf_path: str, pages: List[int]) -> Dict[int,
             page = pdf.pages[page_num - 1]
             
             # Method 1: Use pdfplumber's table extraction with custom settings
-            table_settings = TableSettings(
-                vertical_strategy="text",
-                horizontal_strategy="text",
-                snap_tolerance=3,
-                snap_x_tolerance=3,
-                snap_y_tolerance=3,
-                join_tolerance=3,
-                join_x_tolerance=3,
-                join_y_tolerance=3,
-                edge_min_length=3,
-                min_words_vertical=1,
-                min_words_horizontal=1,
-                intersection_tolerance=3,
-                text_tolerance=3,
-            )
+            # FIXED: Removed 'text_tolerance' parameter as it doesn't exist
+            try:
+                table_settings = {
+                    "vertical_strategy": "text",
+                    "horizontal_strategy": "text",
+                    "snap_tolerance": 3,
+                    "snap_x_tolerance": 3,
+                    "snap_y_tolerance": 3,
+                    "join_tolerance": 3,
+                    "join_x_tolerance": 3,
+                    "join_y_tolerance": 3,
+                    "edge_min_length": 3,
+                    "min_words_vertical": 1,
+                    "min_words_horizontal": 1,
+                    "intersection_tolerance": 3,
+                }
+                
+                tables = page.extract_tables(table_settings)
+            except:
+                # Fallback to default extraction if custom settings fail
+                tables = page.extract_tables()
             
-            tables = page.extract_tables(table_settings)
             page_tables = []
             
             for table_data in tables:
@@ -216,7 +220,7 @@ def extract_tables_with_pdfplumber(pdf_path: str, pages: List[int]) -> Dict[int,
                         df.columns = [f'Column_{i+1}' if pd.isna(col) or str(col).strip() == '' else str(col).strip() 
                                     for i, col in enumerate(df.columns)]
                         
-                        # Only add if table has at least 2 rows and 2 columns
+                        # Only add if table has at least 1 row and 2 columns
                         if not df.empty and len(df) >= 1 and len(df.columns) >= 2:
                             page_tables.append(df)
                     except Exception as e:
