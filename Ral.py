@@ -53,13 +53,6 @@ st.markdown("""
         border-left: 5px solid #ffc107;
         margin: 10px 0;
     }
-    .column-selector {
-        background-color: #f8f9fa;
-        padding: 10px;
-        border-radius: 5px;
-        border: 1px solid #dee2e6;
-        margin: 10px 0;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -87,7 +80,7 @@ def make_columns_unique(columns):
     seen = {}
     unique_columns = []
     for col in columns:
-        col_str = str(col)
+        col_str = str(col).strip()
         if col_str in seen:
             seen[col_str] += 1
             unique_columns.append(f"{col_str}_{seen[col_str]}")
@@ -95,6 +88,17 @@ def make_columns_unique(columns):
             seen[col_str] = 0
             unique_columns.append(col_str)
     return unique_columns
+
+def clean_numeric_value(val):
+    """Clean numeric values by removing commas and converting to float"""
+    if val is None or pd.isna(val) or str(val).strip() == '':
+        return None
+    try:
+        # Remove commas and convert to float
+        cleaned = str(val).replace(',', '').strip()
+        return float(cleaned)
+    except:
+        return val
 
 def convert_to_proper_types(df: pd.DataFrame) -> pd.DataFrame:
     """Convert DataFrame columns to proper data types for Excel compatibility"""
@@ -104,26 +108,25 @@ def convert_to_proper_types(df: pd.DataFrame) -> pd.DataFrame:
         # Skip if column is empty
         if df_converted[col].isna().all():
             continue
-            
+        
         # Try to convert to numeric
         try:
-            # First, clean the data: remove currency symbols and commas
+            # Clean the data: remove currency symbols and commas
             if df_converted[col].dtype == 'object':
-                # Check if column contains currency patterns
+                # Check if column contains numeric patterns
                 sample = df_converted[col].dropna().iloc[0] if not df_converted[col].dropna().empty else ""
                 if isinstance(sample, str):
-                    if any(symbol in sample for symbol in ['$', '€', '£', '¥', '₹', ',']):
-                        # Remove currency symbols and commas, then try numeric conversion
-                        cleaned = df_converted[col].astype(str).str.replace(r'[$,€£¥₹]', '', regex=True)
-                        cleaned = cleaned.str.replace(',', '')
-                        numeric_col = pd.to_numeric(cleaned, errors='coerce')
-                        if not numeric_col.isna().all():
-                            df_converted[col] = numeric_col
-                            continue
+                    # Remove currency symbols and commas
+                    cleaned = df_converted[col].astype(str).str.replace(r'[$,€£¥₹]', '', regex=True)
+                    cleaned = cleaned.str.replace(',', '')
+                    numeric_col = pd.to_numeric(cleaned, errors='coerce')
+                    if not numeric_col.isna().all():
+                        df_converted[col] = numeric_col
+                        continue
             
             # Direct numeric conversion
             numeric_col = pd.to_numeric(df_converted[col], errors='coerce')
-            if not numeric_col.isna().all():  # If at least some values converted successfully
+            if not numeric_col.isna().all():
                 df_converted[col] = numeric_col
                 continue
         except:
@@ -134,49 +137,20 @@ def convert_to_proper_types(df: pd.DataFrame) -> pd.DataFrame:
             if df_converted[col].dtype == 'object':
                 # Common date formats
                 date_col = pd.to_datetime(df_converted[col], errors='coerce', infer_datetime_format=True)
-                if not date_col.isna().all():  # If at least some dates converted successfully
+                if not date_col.isna().all():
                     df_converted[col] = date_col
                     continue
         except:
             pass
         
-        # If all else fails, ensure it's string type for Excel compatibility
+        # If all else fails, ensure it's string type
         if df_converted[col].dtype == 'object':
             df_converted[col] = df_converted[col].astype(str)
     
     return df_converted
 
-def is_table_like(data: List[List[str]]) -> bool:
-    """Check if data looks like a table"""
-    if not data or len(data) < 2:
-        return False
-    
-    # Check for consistent number of columns
-    col_counts = [len(row) for row in data]
-    if max(col_counts) - min(col_counts) > 2:
-        return False
-    
-    # Check for table patterns (numbers, dates, structured data)
-    num_cells = 0
-    for row in data[:5]:  # Check first 5 rows
-        for cell in row:
-            if cell and isinstance(cell, str):
-                # Check for numbers, dates, currency
-                if re.search(r'\d+', cell):
-                    num_cells += 1
-                # Check for common table patterns
-                if any(pattern in cell.lower() for pattern in ['$', '€', '£', '%', '/', '-', ':']):
-                    num_cells += 1
-    
-    # If more than 30% of cells have table-like patterns
-    total_cells = sum(len(row) for row in data[:5])
-    if total_cells > 0 and (num_cells / total_cells) > 0.3:
-        return True
-    
-    return len(data) >= 3 and len(data[0]) >= 2
-
 def extract_tables_with_pdfplumber(pdf_path: str, pages: List[int]) -> Dict[int, List[pd.DataFrame]]:
-    """Extract tables using pdfplumber only - optimized for your table structure"""
+    """Extract tables using pdfplumber"""
     import pdfplumber
     
     tables_by_page = {}
@@ -184,87 +158,54 @@ def extract_tables_with_pdfplumber(pdf_path: str, pages: List[int]) -> Dict[int,
     with pdfplumber.open(pdf_path) as pdf:
         for page_num in pages:
             page = pdf.pages[page_num - 1]
-            
-            # Try multiple extraction strategies
             page_tables = []
             
-            # Strategy 1: Default table extraction
-            try:
-                tables = page.extract_tables()
-                for table_data in tables:
-                    if table_data and len(table_data) > 1:
-                        try:
-                            df = process_table_data(table_data)
-                            if df is not None and not df.empty and len(df) >= 1 and len(df.columns) >= 2:
-                                page_tables.append(df)
-                        except Exception as e:
-                            st.warning(f"Error processing table on page {page_num}: {e}")
-            except:
-                pass
+            # Try multiple extraction strategies
+            strategies = [
+                # Strategy 1: Default extraction
+                lambda: page.extract_tables(),
+                # Strategy 2: Text-based extraction
+                lambda: page.extract_tables({
+                    "vertical_strategy": "text",
+                    "horizontal_strategy": "text",
+                }),
+                # Strategy 3: Lines-based extraction
+                lambda: page.extract_tables({
+                    "vertical_strategy": "lines",
+                    "horizontal_strategy": "lines",
+                })
+            ]
             
-            # Strategy 2: Text-based extraction with custom settings
-            if not page_tables:
+            for strategy in strategies:
                 try:
-                    table_settings = {
-                        "vertical_strategy": "text",
-                        "horizontal_strategy": "text",
-                        "snap_tolerance": 5,
-                        "snap_x_tolerance": 5,
-                        "snap_y_tolerance": 5,
-                        "join_tolerance": 5,
-                        "join_x_tolerance": 5,
-                        "join_y_tolerance": 5,
-                        "edge_min_length": 3,
-                        "min_words_vertical": 1,
-                        "min_words_horizontal": 1,
-                        "intersection_tolerance": 3,
-                    }
-                    tables = page.extract_tables(table_settings)
+                    tables = strategy()
                     for table_data in tables:
                         if table_data and len(table_data) > 1:
-                            try:
-                                df = process_table_data(table_data)
-                                if df is not None and not df.empty and len(df) >= 1 and len(df.columns) >= 2:
-                                    page_tables.append(df)
-                            except:
-                                pass
+                            df = process_table_data(table_data)
+                            if df is not None and not df.empty and len(df) >= 2 and len(df.columns) >= 3:
+                                page_tables.append(df)
+                    if page_tables:
+                        break
                 except:
-                    pass
+                    continue
             
-            # Strategy 3: Extract from text with pattern matching
+            # If no tables found, try text extraction
             if not page_tables:
                 text = page.extract_text()
                 if text:
-                    lines = text.split('\n')
-                    current_table = []
+                    lines = [line for line in text.split('\n') if line.strip()]
                     
+                    # Look for table-like structures in text
+                    table_data = []
                     for line in lines:
-                        if not line.strip():
-                            continue
-                        
-                        # Try to split by multiple spaces or tabs
-                        parts = [part.strip() for part in re.split(r'\s{2,}|\t', line) if part.strip()]
-                        
-                        # Also try splitting by specific patterns for your data
-                        if len(parts) < 2:
-                            # Try splitting by common delimiters
-                            for delimiter in ['  ', '\t', ' | ']:
-                                if delimiter in line:
-                                    parts = [p.strip() for p in line.split(delimiter) if p.strip()]
-                                    break
-                        
-                        if len(parts) >= 2:
-                            current_table.append(parts)
-                        elif current_table and len(current_table) >= 2:
-                            df = process_table_data(current_table)
-                            if df is not None and not df.empty and len(df) >= 1 and len(df.columns) >= 2:
-                                page_tables.append(df)
-                            current_table = []
+                        # Try to split by multiple spaces
+                        parts = [p.strip() for p in re.split(r'\s{2,}', line) if p.strip()]
+                        if len(parts) >= 3:  # At least 3 columns
+                            table_data.append(parts)
                     
-                    # Check last table
-                    if current_table and len(current_table) >= 2:
-                        df = process_table_data(current_table)
-                        if df is not None and not df.empty and len(df) >= 1 and len(df.columns) >= 2:
+                    if table_data:
+                        df = process_table_data(table_data)
+                        if df is not None and not df.empty and len(df) >= 2 and len(df.columns) >= 3:
                             page_tables.append(df)
             
             if page_tables:
@@ -278,42 +219,68 @@ def process_table_data(table_data):
         # Convert to DataFrame
         df = pd.DataFrame(table_data)
         
-        # Clean up the DataFrame
-        df = df.replace('', pd.NA).dropna(how='all').reset_index(drop=True)
+        # Clean up - remove empty rows and columns
+        df = df.replace('', pd.NA).replace('None', pd.NA)
+        df = df.dropna(how='all').reset_index(drop=True)
         df = df.dropna(axis=1, how='all')
         
-        if df.empty or len(df.columns) < 2:
+        if df.empty or len(df) < 2 or len(df.columns) < 2:
             return None
         
-        # Try to detect headers
-        if len(df) > 1:
+        # Try to detect headers - look for text in first row
+        if len(df) > 0:
             first_row = df.iloc[0].astype(str)
-            # Check if first row contains text (likely headers)
-            text_count = sum(1 for val in first_row if re.search(r'[a-zA-Z]', str(val)))
-            if text_count >= len(first_row) * 0.5:  # At least 50% text
+            # Check if first row contains header keywords
+            header_keywords = ['date', 'transaction', 'value', 'cheque', 'remarks', 'withdrawal', 'deposit', 'balance', 'amount', 'description']
+            header_score = 0
+            for val in first_row:
+                val_lower = str(val).lower()
+                if any(keyword in val_lower for keyword in header_keywords):
+                    header_score += 1
+            
+            # If first row looks like headers, use it
+            if header_score >= len(first_row) * 0.3:  # At least 30% match
                 df.columns = first_row
                 df = df[1:].reset_index(drop=True)
         
         # Clean and make column names unique
         new_columns = []
         for i, col in enumerate(df.columns):
-            if pd.isna(col) or str(col).strip() == '' or col is None:
+            col_str = str(col).strip()
+            if pd.isna(col) or col_str == '' or col is None:
                 new_columns.append(f'Column_{i+1}')
             else:
-                new_columns.append(str(col).strip())
+                new_columns.append(col_str)
         
         df.columns = make_columns_unique(new_columns)
         
-        # Try to detect date columns and format them
+        # Clean numeric columns
+        for col in df.columns:
+            # Check if column contains numbers
+            sample = df[col].dropna().head(5)
+            if len(sample) > 0:
+                # Try to clean numeric values
+                cleaned_values = []
+                for val in sample:
+                    cleaned = clean_numeric_value(val)
+                    if cleaned is not None:
+                        cleaned_values.append(cleaned)
+                
+                # If most values converted to numbers, apply to entire column
+                if len(cleaned_values) > 0 and len(cleaned_values) / len(sample) > 0.5:
+                    try:
+                        df[col] = df[col].apply(clean_numeric_value)
+                    except:
+                        pass
+        
+        # Try to detect and convert date columns
         for col in df.columns:
             try:
-                # Check if column contains dates
                 sample = df[col].dropna().head(5)
                 if len(sample) > 0:
                     # Try to convert to datetime
                     date_col = pd.to_datetime(sample, errors='coerce', infer_datetime_format=True)
                     if not date_col.isna().all():
-                        # If more than 50% converted, apply to whole column
                         if date_col.notna().sum() / len(sample) > 0.5:
                             df[col] = pd.to_datetime(df[col], errors='coerce', infer_datetime_format=True)
             except:
@@ -324,44 +291,39 @@ def process_table_data(table_data):
         return None
 
 def analyze_columns_for_patterns(df: pd.DataFrame) -> Dict[str, List[str]]:
-    """Analyze columns for common patterns like debit, credit, etc."""
+    """Analyze columns for common patterns"""
     column_analysis = {}
     
     for col in df.columns:
-        # Skip if column name is None or NaN
         if col is None or pd.isna(col):
             continue
             
         col_name = str(col).lower().strip()
-        if not col_name:  # Skip empty column names
+        if not col_name:
             continue
             
         try:
             col_data = df[col].astype(str).str.lower()
         except:
-            # If column access fails, skip this column
             continue
         
         patterns = {
-            'debit': ['debit', 'dr', 'withdrawal', 'charge', 'payment'],
-            'credit': ['credit', 'cr', 'deposit', 'receipt', 'income'],
+            'date': ['date', 'day', 'month', 'year', 'time'],
+            'description': ['description', 'desc', 'remark', 'note', 'detail'],
             'amount': ['amount', 'amt', 'value', 'total', 'sum'],
-            'date': ['date', 'time', 'day', 'month', 'year'],
-            'description': ['description', 'desc', 'detail', 'note', 'remark'],
+            'withdrawal': ['withdrawal', 'withdraw', 'dr', 'debit', 'payment'],
+            'deposit': ['deposit', 'credit', 'cr', 'receipt', 'income'],
             'balance': ['balance', 'bal', 'remaining'],
-            'account': ['account', 'acct', 'account no', 'acc no'],
-            'name': ['name', 'customer', 'client', 'person'],
-            'id': ['id', 'no.', 'number', 'ref', 'reference'],
-            'status': ['status', 'state', 'condition'],
+            'account': ['account', 'acct', 'account no'],
+            'cheque': ['cheque', 'check', 'chq'],
+            'transaction': ['transaction', 'trans', 'txn'],
         }
         
         matches = []
         for pattern_name, keywords in patterns.items():
-            # Check column name
             if any(keyword in col_name for keyword in keywords):
                 matches.append(pattern_name)
             
-            # Check sample data for patterns
             if len(matches) == 0:
                 try:
                     sample = col_data.head(20).dropna()
@@ -372,7 +334,7 @@ def analyze_columns_for_patterns(df: pd.DataFrame) -> Dict[str, List[str]]:
                 except:
                     pass
         
-        column_analysis[col] = matches[:3]  # Top 3 matches
+        column_analysis[col] = matches[:3]
     
     return column_analysis
 
@@ -390,7 +352,6 @@ with st.sidebar:
             st.session_state.pdf_uploaded = True
             st.session_state.current_file = uploaded_file.name
             
-            # Get PDF metadata
             try:
                 import pdfplumber
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
@@ -417,15 +378,13 @@ with st.sidebar:
     st.markdown("""
     **How it works:**
     1. Upload your PDF
-    2. Select pages to scan
-    3. Extract & analyze tables
-    4. Choose columns & rows
-    5. Export to Excel
+    2. Click "Scan for Tables"
+    3. Review and select columns
+    4. Export to Excel
     """)
 
 # Main content
 if st.session_state.pdf_uploaded:
-    # Display PDF info
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("File", st.session_state.pdf_metadata['file_name'][:20] + "...")
@@ -436,7 +395,6 @@ if st.session_state.pdf_uploaded:
     
     st.markdown("---")
     
-    # Page selection
     st.header("📄 Select Pages to Scan")
     
     total_pages = st.session_state.pdf_metadata['total_pages']
@@ -462,78 +420,38 @@ if st.session_state.pdf_uploaded:
         selected_pages = list(range(start_page, end_page + 1))
         st.info(f"Will scan pages {start_page}-{end_page}")
     
-    else:  # Scan all pages
+    else:
         selected_pages = list(range(1, total_pages + 1))
         if total_pages > 50:
             st.warning(f"⚠️ Scanning all {total_pages} pages may take a while")
         else:
             st.info(f"Will scan all {total_pages} pages")
     
-    # Advanced options
-    with st.expander("⚙️ Table Detection Settings"):
-        col1, col2 = st.columns(2)
-        with col1:
-            min_rows = st.number_input(
-                "Minimum rows per table", 
-                1, 1000000, 1,
-                help="Extract tables with at least this many rows (set to 1 to include all tables)"
-            )
-            min_cols = st.number_input(
-                "Minimum columns per table", 
-                2, 50, 2,
-                help="Minimum number of columns a table must have to be extracted"
-            )
-        with col2:
-            detect_headers = st.checkbox("Auto-detect headers", value=True)
-            preserve_formatting = st.checkbox("Preserve number formatting", value=True)
-    
-    # Excel Formatting Options
-    with st.expander("📊 Excel Data Type Options", expanded=False):
-        st.markdown("**Data Type Conversion for Excel Compatibility:**")
-        col1, col2 = st.columns(2)
-        with col1:
-            convert_numbers = st.checkbox("Convert to numbers (for SUM, AVG, etc.)", value=True,
-                                         help="Convert currency and number strings to actual numbers")
-            convert_dates = st.checkbox("Convert to dates (for date functions)", value=True,
-                                       help="Convert date strings to Excel date format")
-        with col2:
-            preserve_text = st.checkbox("Preserve text formatting", value=True,
-                                       help="Keep text as-is without conversion")
-            auto_detect = st.checkbox("Auto-detect data types", value=True,
-                                     help="Automatically detect and convert appropriate data types")
-    
     # Extract button
     if selected_pages and st.button("🔍 Scan for Tables", type="primary", use_container_width=True):
         with st.spinner(f"Scanning {len(selected_pages)} pages for tables..."):
-            # Save PDF temporarily
             with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
                 tmp.write(uploaded_file.getvalue())
                 pdf_path = tmp.name
             
             try:
-                # Extract tables
                 tables_by_page = extract_tables_with_pdfplumber(pdf_path, selected_pages)
                 
-                # Filter tables based on criteria
                 filtered_tables = {}
                 total_tables_found = 0
-                tables_ignored = 0
                 
                 for page_num, tables in tables_by_page.items():
                     filtered_page_tables = []
                     for table in tables:
-                        if len(table) >= min_rows and len(table.columns) >= min_cols:
+                        if len(table) >= 2 and len(table.columns) >= 3:
                             filtered_page_tables.append(table)
                             total_tables_found += 1
-                        else:
-                            tables_ignored += 1
                     
                     if filtered_page_tables:
                         filtered_tables[page_num] = filtered_page_tables
                 
                 st.session_state.tables_data = filtered_tables
                 
-                # Initialize selections
                 st.session_state.selected_tables = {}
                 st.session_state.column_selections = {}
                 st.session_state.row_selections = {}
@@ -545,7 +463,6 @@ if st.session_state.pdf_uploaded:
                     for table_idx, table in enumerate(tables):
                         table_id = f"table_{table_counter}"
                         
-                        # Store table info
                         st.session_state.selected_tables[table_id] = {
                             "page": page_num,
                             "table_idx": table_idx,
@@ -554,31 +471,25 @@ if st.session_state.pdf_uploaded:
                             "shape": f"{len(table)}x{len(table.columns)}"
                         }
                         
-                        # Initialize column selections (all selected by default)
                         valid_columns = [col for col in table.columns if col is not None and not pd.isna(col)]
                         st.session_state.column_selections[table_id] = {
                             col: True for col in valid_columns
                         }
                         
-                        # Initialize row range selection
                         st.session_state.row_selections[table_id] = {
                             "start_row": 0,
                             "end_row": len(table) - 1,
                             "all_rows": True
                         }
                         
-                        # Store all columns for analysis
                         st.session_state.all_columns[table_id] = valid_columns
                         
                         table_counter += 1
                 
                 if total_tables_found > 0:
-                    st.success(f"✅ Found {total_tables_found} tables with at least {min_rows} rows across {len(filtered_tables)} pages")
-                    
-                    if tables_ignored > 0:
-                        st.info(f"ℹ️ Ignored {tables_ignored} tables that had fewer than {min_rows} rows")
+                    st.success(f"✅ Found {total_tables_found} tables across {len(filtered_tables)} pages")
                 else:
-                    st.warning(f"⚠️ No tables found with at least {min_rows} rows. Try reducing the minimum row requirement or select more pages.")
+                    st.warning("⚠️ No tables found. Try scanning different pages.")
                 
             except Exception as e:
                 st.error(f"Error extracting tables: {e}")
@@ -588,12 +499,11 @@ if st.session_state.pdf_uploaded:
                 except:
                     pass
 
-# Display extracted tables with column/row selection
+# Display extracted tables
 if st.session_state.tables_data:
     st.markdown("---")
-    st.header("📋 Select Columns & Rows for Export")
+    st.header("📋 Review Extracted Tables")
     
-    # Summary
     total_tables = sum(len(tables) for tables in st.session_state.tables_data.values())
     selected_tables = sum(1 for info in st.session_state.selected_tables.values() if info.get("selected", False))
     
@@ -603,11 +513,9 @@ if st.session_state.tables_data:
     with col2:
         st.metric("Selected for Export", selected_tables)
     
-    # Table browser with column/row selection
     pages_with_tables = sorted(st.session_state.tables_data.keys())
     
     if pages_with_tables:
-        # Create tabs for each page with tables
         tabs = st.tabs([f"Page {page}" for page in pages_with_tables])
         
         for tab_idx, (page_num, tab) in enumerate(zip(pages_with_tables, tabs)):
@@ -616,7 +524,6 @@ if st.session_state.tables_data:
                 st.subheader(f"📄 Page {page_num} - {len(tables_on_page)} table(s)")
                 
                 for table_idx, table in enumerate(tables_on_page):
-                    # Find table ID
                     table_id = None
                     for t_id, t_info in st.session_state.selected_tables.items():
                         if t_info["page"] == page_num and t_info["table_idx"] == table_idx:
@@ -624,140 +531,56 @@ if st.session_state.tables_data:
                             break
                     
                     if table_id:
-                        # Table header
                         st.markdown(f"### Table {table_idx + 1} ({len(table)} rows × {len(table.columns)} columns)")
                         
-                        # Table selection
-                        col1, col2 = st.columns([1, 3])
-                        with col1:
-                            is_selected = st.checkbox(
-                                "Include this table in export",
-                                value=st.session_state.selected_tables[table_id].get("selected", True),
-                                key=f"select_{table_id}",
-                                help="Uncheck to exclude this table from export"
-                            )
-                            st.session_state.selected_tables[table_id]["selected"] = is_selected
+                        # Show table preview
+                        st.dataframe(table, use_container_width=True, height=300)
                         
-                        with col2:
-                            if is_selected:
-                                st.success("✅ This table will be exported")
-                            else:
-                                st.warning("❌ This table will NOT be exported")
+                        # Column selection
+                        st.markdown("#### Select Columns to Export")
+                        all_columns = [col for col in table.columns if col is not None and not pd.isna(col)]
                         
-                        if is_selected:
-                            # Column selection section
-                            st.markdown("#### 🗂️ Select Columns")
-                            
-                            # Analyze columns for patterns
-                            column_analysis = analyze_columns_for_patterns(table)
-                            
-                            # Create multi-select for columns
-                            all_columns = [col for col in table.columns if col is not None and not pd.isna(col)]
-                            
-                            # Default columns to select (all by default)
-                            default_selected = []
-                            for col in all_columns:
-                                if col in st.session_state.column_selections.get(table_id, {}):
-                                    if st.session_state.column_selections[table_id].get(col, True):
-                                        default_selected.append(col)
-                            
-                            selected_columns = st.multiselect(
-                                f"Choose columns for Table {table_idx + 1}",
-                                options=all_columns,
-                                default=default_selected if default_selected else all_columns,
-                                key=f"cols_{table_id}",
-                                help="Select columns to include in export"
-                            )
-                            
-                            # Update column selections
-                            st.session_state.column_selections[table_id] = {
-                                col: (col in selected_columns) for col in all_columns
-                            }
-                            
-                            # Show column analysis tags
-                            if selected_columns:
-                                st.markdown("**Detected patterns in selected columns:**")
-                                cols_container = st.container()
-                                with cols_container:
-                                    cols = st.columns(min(5, len(selected_columns)))
-                                    for idx, col in enumerate(selected_columns[:5]):
-                                        with cols[idx % 5]:
-                                            if col in column_analysis and column_analysis[col]:
-                                                tags = ", ".join(column_analysis[col][:2])
-                                                st.caption(f"**{col[:15]}...**")
-                                                st.markdown(f"<small>{tags}</small>", unsafe_allow_html=True)
-                            
-                            # Row selection section
-                            st.markdown("#### 📊 Select Rows Range")
-                            total_rows = len(table)
-                            
-                            col1, col2, col3 = st.columns([2, 2, 1])
+                        selected_columns = st.multiselect(
+                            f"Columns for Table {table_idx + 1}",
+                            options=all_columns,
+                            default=all_columns,
+                            key=f"cols_{table_id}"
+                        )
+                        
+                        st.session_state.column_selections[table_id] = {
+                            col: (col in selected_columns) for col in all_columns
+                        }
+                        
+                        # Row range selection
+                        st.markdown("#### Select Rows Range")
+                        total_rows = len(table)
+                        
+                        use_all_rows = st.checkbox(
+                            "Export all rows",
+                            value=True,
+                            key=f"allrows_{table_id}"
+                        )
+                        st.session_state.row_selections[table_id]["all_rows"] = use_all_rows
+                        
+                        if not use_all_rows:
+                            col1, col2 = st.columns(2)
                             with col1:
-                                use_all_rows = st.checkbox(
-                                    "Export all rows",
-                                    value=st.session_state.row_selections[table_id].get("all_rows", True),
-                                    key=f"allrows_{table_id}"
+                                start_row = st.number_input(
+                                    "Start row",
+                                    0, total_rows - 1, 0,
+                                    key=f"start_{table_id}"
                                 )
-                                st.session_state.row_selections[table_id]["all_rows"] = use_all_rows
+                            with col2:
+                                end_row = st.number_input(
+                                    "End row",
+                                    start_row + 1, total_rows - 1, total_rows - 1,
+                                    key=f"end_{table_id}"
+                                )
                             
-                            if not use_all_rows:
-                                with col2:
-                                    start_row = st.number_input(
-                                        "Start row",
-                                        0,
-                                        total_rows - 1,
-                                        st.session_state.row_selections[table_id].get("start_row", 0),
-                                        key=f"start_{table_id}",
-                                        help="Starting row index (0-based)"
-                                    )
-                                    st.session_state.row_selections[table_id]["start_row"] = start_row
-                                
-                                with col3:
-                                    end_row = st.number_input(
-                                        "End row",
-                                        start_row + 1,
-                                        total_rows - 1,
-                                        st.session_state.row_selections[table_id].get("end_row", total_rows - 1),
-                                        key=f"end_{table_id}",
-                                        help="Ending row index (inclusive)"
-                                    )
-                                    st.session_state.row_selections[table_id]["end_row"] = end_row
-                                
-                                if start_row < end_row:
-                                    rows_to_export = end_row - start_row + 1
-                                    st.info(f"Will export rows {start_row:,} to {end_row:,} ({rows_to_export:,} rows)")
-                            
-                            # Preview section
-                            with st.expander("👁️ Preview Selected Data", expanded=False):
-                                # Get filtered data based on selections
-                                try:
-                                    if use_all_rows:
-                                        if selected_columns:
-                                            preview_df = table[selected_columns].copy()
-                                        else:
-                                            preview_df = table.copy()
-                                    else:
-                                        if selected_columns:
-                                            preview_df = table.iloc[start_row:end_row+1][selected_columns].copy()
-                                        else:
-                                            preview_df = table.iloc[start_row:end_row+1].copy()
-                                    
-                                    # Ensure column names are strings
-                                    preview_df.columns = [str(col) for col in preview_df.columns]
-                                    
-                                    if not preview_df.empty:
-                                        st.dataframe(
-                                            preview_df.head(50),
-                                            use_container_width=True,
-                                            height=400
-                                        )
-                                        st.caption(f"Showing first 50 rows of {len(preview_df):,} total rows")
-                                    else:
-                                        st.warning("No data to preview. Please select at least one column.")
-                                except Exception as e:
-                                    st.warning(f"Error previewing data: {e}")
-                    
-                    st.markdown("---")
+                            st.session_state.row_selections[table_id]["start_row"] = start_row
+                            st.session_state.row_selections[table_id]["end_row"] = end_row
+                        
+                        st.markdown("---")
     
     # Export section
     st.markdown("---")
@@ -768,31 +591,21 @@ if st.session_state.tables_data:
     with col1:
         excel_name = st.text_input(
             "Excel file name",
-            value=f"{st.session_state.pdf_metadata['file_name'].replace('.pdf', '')}_tables.xlsx"
+            value=f"{st.session_state.pdf_metadata['file_name'].replace('.pdf', '')}_transactions.xlsx"
         )
         
         export_mode = st.radio(
             "Export format:",
-            ["Each table → Separate sheet", "All tables → One sheet", "Tables by page → Sheets by page"]
+            ["Each table → Separate sheet", "All tables → One sheet"]
         )
-        
-        # Column naming options
-        st.markdown("**Column Handling:**")
-        rename_columns = st.checkbox("Use smart column names", value=True, 
-                                     help="Rename columns based on detected patterns (e.g., Debit, Credit)")
     
     with col2:
         include_metadata = st.checkbox("Include metadata sheet", value=True)
-        auto_format = st.checkbox("Auto-format columns width", value=True)
-        
-        # Data cleaning options
-        st.markdown("**Data Cleaning:**")
-        remove_duplicates = st.checkbox("Remove duplicate rows", value=False)
-        remove_empty = st.checkbox("Remove empty rows", value=True)
+        auto_format = st.checkbox("Auto-format columns", value=True)
+        convert_numbers = st.checkbox("Convert numbers to proper format", value=True)
     
     # Export button
     if st.button("📥 Generate Excel File", type="primary", use_container_width=True):
-        # Collect selected tables with column/row selections
         tables_to_export = []
         export_summary = []
         
@@ -800,14 +613,12 @@ if st.session_state.tables_data:
             if table_info.get("selected", False):
                 df = table_info.get("df")
                 if df is not None:
-                    # Apply column selection
                     selected_cols = [
                         col for col, is_selected in st.session_state.column_selections.get(table_id, {}).items()
                         if is_selected and col is not None and not pd.isna(col)
                     ]
                     
-                    if selected_cols:  # Only export if at least one column is selected
-                        # Apply row selection
+                    if selected_cols:
                         row_selection = st.session_state.row_selections.get(table_id, {})
                         
                         try:
@@ -818,32 +629,8 @@ if st.session_state.tables_data:
                                 end_row = row_selection.get("end_row", len(df) - 1)
                                 filtered_df = df.iloc[start_row:end_row+1][selected_cols].copy()
                             
-                            # Apply data cleaning
-                            if remove_empty:
-                                filtered_df = filtered_df.replace(r'^\s*$', np.nan, regex=True)
-                                filtered_df = filtered_df.dropna(how='all')
-                            
-                            if remove_duplicates:
-                                filtered_df = filtered_df.drop_duplicates()
-                            
-                            # Rename columns if requested
-                            if rename_columns and not filtered_df.empty:
-                                column_analysis = analyze_columns_for_patterns(filtered_df)
-                                new_columns = []
-                                for col in filtered_df.columns:
-                                    if col in column_analysis and column_analysis.get(col):
-                                        # Use first detected pattern
-                                        new_name = column_analysis[col][0].title()
-                                        # Add index if duplicate
-                                        if new_name in new_columns:
-                                            new_name = f"{new_name}_{new_columns.count(new_name) + 1}"
-                                        new_columns.append(new_name)
-                                    else:
-                                        new_columns.append(str(col))
-                                filtered_df.columns = new_columns
-                            
-                            # Convert to proper data types for Excel
-                            if convert_numbers or convert_dates or auto_detect:
+                            # Convert numbers
+                            if convert_numbers:
                                 filtered_df = convert_to_proper_types(filtered_df)
                             
                             if not filtered_df.empty:
@@ -867,95 +654,61 @@ if st.session_state.tables_data:
                             st.warning(f"Error processing table {table_id}: {e}")
         
         if not tables_to_export:
-            st.warning("No data selected for export! Please select at least one column per table.")
+            st.warning("No data selected for export!")
         else:
             total_rows = sum(len(t["df"]) for t in tables_to_export)
-            st.info(f"Preparing to export {total_rows:,} total rows from {len(tables_to_export)} tables...")
+            st.info(f"Preparing to export {total_rows:,} rows from {len(tables_to_export)} tables...")
             
-            with st.spinner(f"Creating Excel file with {total_rows:,} rows..."):
-                # Create temporary Excel file
+            with st.spinner(f"Creating Excel file..."):
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_excel:
                     excel_path = tmp_excel.name
                 
                 try:
                     with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
-                        # Metadata sheet
                         if include_metadata:
                             metadata_df = pd.DataFrame({
                                 'Property': [
                                     'File Name', 'Total Pages', 'Tables Exported', 
-                                    'Total Rows Exported', 'Export Date', 'Export Settings',
-                                    'Number Conversion', 'Date Conversion'
+                                    'Total Rows Exported', 'Export Date'
                                 ],
                                 'Value': [
                                     st.session_state.pdf_metadata['file_name'],
                                     st.session_state.pdf_metadata['total_pages'],
                                     len(tables_to_export),
                                     total_rows,
-                                    pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'),
-                                    f"Smart Names: {rename_columns}, Cleaned: {remove_duplicates}|{remove_empty}",
-                                    'Yes' if convert_numbers else 'No',
-                                    'Yes' if convert_dates else 'No'
+                                    pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
                                 ]
                             })
                             metadata_df.to_excel(writer, sheet_name='Metadata', index=False)
                         
-                        # Export based on selected mode
                         if export_mode == "Each table → Separate sheet":
                             for i, table_data in enumerate(tables_to_export):
                                 df = table_data["df"]
                                 sheet_name = f"P{table_data['page']}_T{table_data['table_idx']+1}"
-                                sheet_name = sheet_name[:31]  # Excel limit
+                                sheet_name = sheet_name[:31]
                                 df.to_excel(writer, sheet_name=sheet_name, index=False)
                         
-                        elif export_mode == "All tables → One sheet":
+                        else:  # All tables → One sheet
                             all_dfs = []
                             for table_data in tables_to_export:
                                 df = table_data["df"].copy()
                                 df.insert(0, 'Source_Page', table_data["page"])
                                 df.insert(1, 'Source_Table', table_data["table_idx"] + 1)
                                 all_dfs.append(df)
-                                # Add separator
                                 separator = pd.DataFrame([{col: '---' for col in df.columns}])
                                 all_dfs.append(separator)
                             
                             if all_dfs:
-                                combined_df = pd.concat(all_dfs[:-1], ignore_index=True)  # Exclude last separator
-                                combined_df.to_excel(writer, sheet_name='All_Tables', index=False)
+                                combined_df = pd.concat(all_dfs[:-1], ignore_index=True)
+                                combined_df.to_excel(writer, sheet_name='All_Data', index=False)
                         
-                        else:  # Tables by page → Sheets by page
-                            tables_by_page = {}
-                            for table_data in tables_to_export:
-                                page = table_data["page"]
-                                if page not in tables_by_page:
-                                    tables_by_page[page] = []
-                                tables_by_page[page].append(table_data)
-                            
-                            for page_num, page_tables in tables_by_page.items():
-                                page_dfs = []
-                                for table_data in page_tables:
-                                    df = table_data["df"].copy()
-                                    df.insert(0, 'Table', table_data["table_idx"] + 1)
-                                    page_dfs.append(df)
-                                    # Add separator
-                                    separator = pd.DataFrame([{col: '---' for col in df.columns}])
-                                    page_dfs.append(separator)
-                                
-                                if page_dfs:
-                                    combined_page_df = pd.concat(page_dfs[:-1], ignore_index=True)
-                                    sheet_name = f"Page_{page_num}"
-                                    sheet_name = sheet_name[:31]
-                                    combined_page_df.to_excel(writer, sheet_name=sheet_name, index=False)
-                        
-                        # Auto-format if enabled
+                        # Auto-format columns
                         if auto_format:
                             from openpyxl.utils import get_column_letter
-                            from openpyxl.styles import numbers
                             
                             for sheet_name in writer.sheets:
                                 worksheet = writer.sheets[sheet_name]
                                 
-                                # Auto-fit columns
                                 for column in worksheet.columns:
                                     max_length = 0
                                     column_letter = get_column_letter(column[0].column)
@@ -963,20 +716,7 @@ if st.session_state.tables_data:
                                     for cell in column:
                                         try:
                                             if cell.value:
-                                                # Check if it's a date
-                                                if isinstance(cell.value, (datetime, pd.Timestamp)):
-                                                    cell.number_format = 'yyyy-mm-dd'  # Date format
-                                                    cell_value = str(cell.value)
-                                                # Check if it's a number
-                                                elif isinstance(cell.value, (int, float)):
-                                                    if isinstance(cell.value, float):
-                                                        cell.number_format = '#,##0.00'  # Number format with 2 decimals
-                                                    else:
-                                                        cell.number_format = '#,##0'  # Number format
-                                                    cell_value = str(cell.value)
-                                                else:
-                                                    cell_value = str(cell.value)
-                                                
+                                                cell_value = str(cell.value)
                                                 if len(cell_value) > max_length:
                                                     max_length = len(cell_value)
                                         except:
@@ -985,12 +725,8 @@ if st.session_state.tables_data:
                                     adjusted_width = min(max_length + 2, 50)
                                     worksheet.column_dimensions[column_letter].width = adjusted_width
                     
-                    # Read the Excel file
                     with open(excel_path, 'rb') as f:
                         excel_data = f.read()
-                    
-                    # Success message
-                    avg_rows = total_rows // len(tables_to_export) if tables_to_export else 0
                     
                     st.markdown(f"""
                     <div class="success-box">
@@ -998,17 +734,13 @@ if st.session_state.tables_data:
                     <p><strong>File:</strong> {excel_name}</p>
                     <p><strong>Tables exported:</strong> {len(tables_to_export)}</p>
                     <p><strong>Total rows exported:</strong> {total_rows:,}</p>
-                    <p><strong>Average rows per table:</strong> {avg_rows:,}</p>
-                    <p><strong>Data Types:</strong> Numbers and dates are properly formatted for Excel functions</p>
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    # Show summary
                     st.subheader("📊 Export Summary")
                     summary_df = pd.DataFrame(export_summary)
                     st.dataframe(summary_df, use_container_width=True)
                     
-                    # Download button
                     st.download_button(
                         label=f"⬇️ Download Excel File ({total_rows:,} rows)",
                         data=excel_data,
@@ -1026,47 +758,16 @@ if st.session_state.tables_data:
                         pass
 
 else:
-    # Welcome screen
     st.markdown("""
     <div class="info-box">
     <h3>📊 PDF Table Extractor</h3>
-    <p>Extract tabular data from PDF files <strong>without Java dependency</strong>.</p>
-    <p>This tool allows you to extract tables of any size with customizable column selection.</p>
-    <p><strong>Excel Compatibility:</strong> Numbers and dates are properly formatted for Excel functions like SUM, AVERAGE, date calculations, etc.</p>
+    <p>Upload a PDF file using the sidebar to extract tables.</p>
+    <p>This tool will detect tables with 7 columns: Transaction Date, Value Date, Cheque Number, Transaction Remarks, Withdrawal, Deposit, and Balance.</p>
     </div>
     """, unsafe_allow_html=True)
-    
-    st.markdown("---")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("### ✅ **Key Features**")
-        st.markdown("""
-        - **Flexible table size** (1 row to 1,000,000+ rows)
-        - **Smart column detection** (Debit, Credit, etc.)
-        - **Column-by-column selection**
-        - **Row range selection**
-        - **No Java installation required**
-        - **Multiple export formats**
-        """)
-    
-    with col2:
-        st.markdown("### 📊 **Excel Compatibility**")
-        st.markdown("""
-        - **Numbers** - Use SUM, AVERAGE, COUNT
-        - **Dates** - Use date functions, sorting
-        - **Currency** - Perform calculations
-        - **Auto-formatting** - Proper column widths
-        - **No text conversion** - Real Excel data types
-        """)
-    
-    st.markdown("---")
-    st.markdown("*Upload a PDF file using the sidebar to begin*")
 
-# Footer
 st.markdown("---")
 st.markdown(
-    "<div style='text-align: center; color: gray;'>PDF Table Extractor • Excel Compatible Data Types • Built with Streamlit</div>",
+    "<div style='text-align: center; color: gray;'>PDF Table Extractor • Built with Streamlit</div>",
     unsafe_allow_html=True
 )
