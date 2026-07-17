@@ -172,7 +172,6 @@ def extract_tables_with_pdfplumber(pdf_path: str, pages: List[int]) -> Dict[int,
             page = pdf.pages[page_num - 1]
             
             # Method 1: Use pdfplumber's table extraction with custom settings
-            # FIXED: Removed 'text_tolerance' parameter as it doesn't exist
             try:
                 table_settings = {
                     "vertical_strategy": "text",
@@ -216,9 +215,14 @@ def extract_tables_with_pdfplumber(pdf_path: str, pages: List[int]) -> Dict[int,
                                 df.columns = first_row
                                 df = df[1:].reset_index(drop=True)
                         
-                        # Rename columns if needed
-                        df.columns = [f'Column_{i+1}' if pd.isna(col) or str(col).strip() == '' else str(col).strip() 
-                                    for i, col in enumerate(df.columns)]
+                        # Rename columns if needed - handle None/NaN column names
+                        new_columns = []
+                        for i, col in enumerate(df.columns):
+                            if pd.isna(col) or str(col).strip() == '' or col is None:
+                                new_columns.append(f'Column_{i+1}')
+                            else:
+                                new_columns.append(str(col).strip())
+                        df.columns = new_columns
                         
                         # Only add if table has at least 1 row and 2 columns
                         if not df.empty and len(df) >= 1 and len(df.columns) >= 2:
@@ -258,6 +262,15 @@ def extract_tables_with_pdfplumber(pdf_path: str, pages: List[int]) -> Dict[int,
                                     df = df.replace('', pd.NA).dropna(how='all').reset_index(drop=True)
                                     df = df.dropna(axis=1, how='all')
                                     
+                                    # Rename columns
+                                    new_columns = []
+                                    for i, col in enumerate(df.columns):
+                                        if pd.isna(col) or str(col).strip() == '' or col is None:
+                                            new_columns.append(f'Column_{i+1}')
+                                        else:
+                                            new_columns.append(str(col).strip())
+                                    df.columns = new_columns
+                                    
                                     if not df.empty and len(df) >= 1 and len(df.columns) >= 2:
                                         page_tables.append(df)
                                 except:
@@ -272,6 +285,16 @@ def extract_tables_with_pdfplumber(pdf_path: str, pages: List[int]) -> Dict[int,
                             df = pd.DataFrame(padded_table)
                             df = df.replace('', pd.NA).dropna(how='all').reset_index(drop=True)
                             df = df.dropna(axis=1, how='all')
+                            
+                            # Rename columns
+                            new_columns = []
+                            for i, col in enumerate(df.columns):
+                                if pd.isna(col) or str(col).strip() == '' or col is None:
+                                    new_columns.append(f'Column_{i+1}')
+                                else:
+                                    new_columns.append(str(col).strip())
+                            df.columns = new_columns
+                            
                             if not df.empty and len(df) >= 1 and len(df.columns) >= 2:
                                 page_tables.append(df)
                         except:
@@ -287,8 +310,19 @@ def analyze_columns_for_patterns(df: pd.DataFrame) -> Dict[str, List[str]]:
     column_analysis = {}
     
     for col in df.columns:
+        # Skip if column name is None or NaN
+        if col is None or pd.isna(col):
+            continue
+            
         col_name = str(col).lower().strip()
-        col_data = df[col].astype(str).str.lower()
+        if not col_name:  # Skip empty column names
+            continue
+            
+        try:
+            col_data = df[col].astype(str).str.lower()
+        except:
+            # If column access fails, skip this column
+            continue
         
         patterns = {
             'debit': ['debit', 'dr', 'withdrawal', 'charge', 'payment'],
@@ -311,11 +345,14 @@ def analyze_columns_for_patterns(df: pd.DataFrame) -> Dict[str, List[str]]:
             
             # Check sample data for patterns
             if len(matches) == 0:
-                sample = col_data.head(20).dropna()
-                if not sample.empty:
-                    sample_text = ' '.join(sample)
-                    if any(keyword in sample_text for keyword in keywords):
-                        matches.append(pattern_name)
+                try:
+                    sample = col_data.head(20).dropna()
+                    if not sample.empty:
+                        sample_text = ' '.join(sample)
+                        if any(keyword in sample_text for keyword in keywords):
+                            matches.append(pattern_name)
+                except:
+                    pass
         
         column_analysis[col] = matches[:3]  # Top 3 matches
     
@@ -503,7 +540,7 @@ if st.session_state.pdf_uploaded:
                         
                         # Initialize column selections (all selected by default)
                         st.session_state.column_selections[table_id] = {
-                            col: True for col in table.columns
+                            col: True for col in table.columns if col is not None and not pd.isna(col)
                         }
                         
                         # Initialize row range selection
@@ -514,7 +551,7 @@ if st.session_state.pdf_uploaded:
                         }
                         
                         # Store all columns for analysis
-                        st.session_state.all_columns[table_id] = table.columns.tolist()
+                        st.session_state.all_columns[table_id] = [col for col in table.columns if col is not None and not pd.isna(col)]
                         
                         table_counter += 1
                 
@@ -598,7 +635,7 @@ if st.session_state.tables_data:
                             column_analysis = analyze_columns_for_patterns(table)
                             
                             # Create multi-select for columns
-                            all_columns = table.columns.tolist()
+                            all_columns = [col for col in table.columns if col is not None and not pd.isna(col)]
                             
                             # Default columns to select (based on analysis)
                             default_selected = []
@@ -764,7 +801,7 @@ if st.session_state.tables_data:
                             column_analysis = analyze_columns_for_patterns(filtered_df)
                             new_columns = []
                             for col in filtered_df.columns:
-                                if column_analysis.get(col):
+                                if col in column_analysis and column_analysis.get(col):
                                     # Use first detected pattern
                                     new_name = column_analysis[col][0].title()
                                     # Add index if duplicate
@@ -772,7 +809,7 @@ if st.session_state.tables_data:
                                         new_name = f"{new_name}_{new_columns.count(new_name) + 1}"
                                     new_columns.append(new_name)
                                 else:
-                                    new_columns.append(col)
+                                    new_columns.append(str(col))
                             filtered_df.columns = new_columns
                         
                         # Convert to proper data types for Excel
