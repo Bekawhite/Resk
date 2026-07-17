@@ -176,7 +176,7 @@ def is_table_like(data: List[List[str]]) -> bool:
     return len(data) >= 3 and len(data[0]) >= 2
 
 def extract_tables_with_pdfplumber(pdf_path: str, pages: List[int]) -> Dict[int, List[pd.DataFrame]]:
-    """Extract tables using pdfplumber only - MODIFIED to better detect tables"""
+    """Extract tables using pdfplumber only - optimized for your table structure"""
     import pdfplumber
     
     tables_by_page = {}
@@ -185,141 +185,143 @@ def extract_tables_with_pdfplumber(pdf_path: str, pages: List[int]) -> Dict[int,
         for page_num in pages:
             page = pdf.pages[page_num - 1]
             
-            # Method 1: Use pdfplumber's table extraction with custom settings
-            try:
-                table_settings = {
-                    "vertical_strategy": "text",
-                    "horizontal_strategy": "text",
-                    "snap_tolerance": 3,
-                    "snap_x_tolerance": 3,
-                    "snap_y_tolerance": 3,
-                    "join_tolerance": 3,
-                    "join_x_tolerance": 3,
-                    "join_y_tolerance": 3,
-                    "edge_min_length": 3,
-                    "min_words_vertical": 1,
-                    "min_words_horizontal": 1,
-                    "intersection_tolerance": 3,
-                }
-                
-                tables = page.extract_tables(table_settings)
-            except:
-                # Fallback to default extraction if custom settings fail
-                tables = page.extract_tables()
-            
+            # Try multiple extraction strategies
             page_tables = []
             
-            for table_data in tables:
-                if table_data and len(table_data) > 1:
-                    try:
-                        # Convert to DataFrame
-                        df = pd.DataFrame(table_data)
-                        
-                        # Clean up the DataFrame
-                        df = df.replace('', pd.NA).dropna(how='all').reset_index(drop=True)
-                        
-                        # Remove empty columns
-                        df = df.dropna(axis=1, how='all')
-                        
-                        # Check if first row might be header (contains text, not just numbers)
-                        if len(df) > 1:
-                            first_row = df.iloc[0].astype(str)
-                            # Check if first row might be header
-                            if first_row.str.contains(r'[a-zA-Z]').any() and not first_row.str.contains(r'^\d+$').all():
-                                df.columns = first_row
-                                df = df[1:].reset_index(drop=True)
-                        
-                        # Rename columns if needed - handle None/NaN column names and make unique
-                        new_columns = []
-                        for i, col in enumerate(df.columns):
-                            if pd.isna(col) or str(col).strip() == '' or col is None:
-                                new_columns.append(f'Column_{i+1}')
-                            else:
-                                new_columns.append(str(col).strip())
-                        
-                        # Make column names unique
-                        df.columns = make_columns_unique(new_columns)
-                        
-                        # Only add if table has at least 1 row and 2 columns
-                        if not df.empty and len(df) >= 1 and len(df.columns) >= 2:
-                            page_tables.append(df)
-                    except Exception as e:
-                        st.warning(f"Error processing table on page {page_num}: {e}")
+            # Strategy 1: Default table extraction
+            try:
+                tables = page.extract_tables()
+                for table_data in tables:
+                    if table_data and len(table_data) > 1:
+                        try:
+                            df = process_table_data(table_data)
+                            if df is not None and not df.empty and len(df) >= 1 and len(df.columns) >= 2:
+                                page_tables.append(df)
+                        except Exception as e:
+                            st.warning(f"Error processing table on page {page_num}: {e}")
+            except:
+                pass
             
-            # Method 2: Extract text and look for tabular patterns
+            # Strategy 2: Text-based extraction with custom settings
+            if not page_tables:
+                try:
+                    table_settings = {
+                        "vertical_strategy": "text",
+                        "horizontal_strategy": "text",
+                        "snap_tolerance": 5,
+                        "snap_x_tolerance": 5,
+                        "snap_y_tolerance": 5,
+                        "join_tolerance": 5,
+                        "join_x_tolerance": 5,
+                        "join_y_tolerance": 5,
+                        "edge_min_length": 3,
+                        "min_words_vertical": 1,
+                        "min_words_horizontal": 1,
+                        "intersection_tolerance": 3,
+                    }
+                    tables = page.extract_tables(table_settings)
+                    for table_data in tables:
+                        if table_data and len(table_data) > 1:
+                            try:
+                                df = process_table_data(table_data)
+                                if df is not None and not df.empty and len(df) >= 1 and len(df.columns) >= 2:
+                                    page_tables.append(df)
+                            except:
+                                pass
+                except:
+                    pass
+            
+            # Strategy 3: Extract from text with pattern matching
             if not page_tables:
                 text = page.extract_text()
                 if text:
                     lines = text.split('\n')
-                    
-                    # Look for tabular patterns (aligned columns, consistent spacing)
-                    tabular_lines = []
                     current_table = []
                     
                     for line in lines:
-                        # Skip empty lines
                         if not line.strip():
                             continue
-                            
-                        # Check if line has tabular pattern (multiple items separated by 2+ spaces or tabs)
+                        
+                        # Try to split by multiple spaces or tabs
                         parts = [part.strip() for part in re.split(r'\s{2,}|\t', line) if part.strip()]
+                        
+                        # Also try splitting by specific patterns for your data
+                        if len(parts) < 2:
+                            # Try splitting by common delimiters
+                            for delimiter in ['  ', '\t', ' | ']:
+                                if delimiter in line:
+                                    parts = [p.strip() for p in line.split(delimiter) if p.strip()]
+                                    break
                         
                         if len(parts) >= 2:
                             current_table.append(parts)
-                        elif current_table:
-                            if len(current_table) >= 2:
-                                # Convert to DataFrame
-                                try:
-                                    # Find max columns
-                                    max_cols = max(len(row) for row in current_table)
-                                    padded_table = [row + [''] * (max_cols - len(row)) for row in current_table]
-                                    
-                                    df = pd.DataFrame(padded_table)
-                                    df = df.replace('', pd.NA).dropna(how='all').reset_index(drop=True)
-                                    df = df.dropna(axis=1, how='all')
-                                    
-                                    # Rename columns and make unique
-                                    new_columns = []
-                                    for i, col in enumerate(df.columns):
-                                        if pd.isna(col) or str(col).strip() == '' or col is None:
-                                            new_columns.append(f'Column_{i+1}')
-                                        else:
-                                            new_columns.append(str(col).strip())
-                                    df.columns = make_columns_unique(new_columns)
-                                    
-                                    if not df.empty and len(df) >= 1 and len(df.columns) >= 2:
-                                        page_tables.append(df)
-                                except:
-                                    pass
+                        elif current_table and len(current_table) >= 2:
+                            df = process_table_data(current_table)
+                            if df is not None and not df.empty and len(df) >= 1 and len(df.columns) >= 2:
+                                page_tables.append(df)
                             current_table = []
                     
                     # Check last table
                     if current_table and len(current_table) >= 2:
-                        try:
-                            max_cols = max(len(row) for row in current_table)
-                            padded_table = [row + [''] * (max_cols - len(row)) for row in current_table]
-                            df = pd.DataFrame(padded_table)
-                            df = df.replace('', pd.NA).dropna(how='all').reset_index(drop=True)
-                            df = df.dropna(axis=1, how='all')
-                            
-                            # Rename columns and make unique
-                            new_columns = []
-                            for i, col in enumerate(df.columns):
-                                if pd.isna(col) or str(col).strip() == '' or col is None:
-                                    new_columns.append(f'Column_{i+1}')
-                                else:
-                                    new_columns.append(str(col).strip())
-                            df.columns = make_columns_unique(new_columns)
-                            
-                            if not df.empty and len(df) >= 1 and len(df.columns) >= 2:
-                                page_tables.append(df)
-                        except:
-                            pass
+                        df = process_table_data(current_table)
+                        if df is not None and not df.empty and len(df) >= 1 and len(df.columns) >= 2:
+                            page_tables.append(df)
             
             if page_tables:
                 tables_by_page[page_num] = page_tables
     
     return tables_by_page
+
+def process_table_data(table_data):
+    """Process table data and convert to DataFrame with proper structure"""
+    try:
+        # Convert to DataFrame
+        df = pd.DataFrame(table_data)
+        
+        # Clean up the DataFrame
+        df = df.replace('', pd.NA).dropna(how='all').reset_index(drop=True)
+        df = df.dropna(axis=1, how='all')
+        
+        if df.empty or len(df.columns) < 2:
+            return None
+        
+        # Try to detect headers
+        if len(df) > 1:
+            first_row = df.iloc[0].astype(str)
+            # Check if first row contains text (likely headers)
+            text_count = sum(1 for val in first_row if re.search(r'[a-zA-Z]', str(val)))
+            if text_count >= len(first_row) * 0.5:  # At least 50% text
+                df.columns = first_row
+                df = df[1:].reset_index(drop=True)
+        
+        # Clean and make column names unique
+        new_columns = []
+        for i, col in enumerate(df.columns):
+            if pd.isna(col) or str(col).strip() == '' or col is None:
+                new_columns.append(f'Column_{i+1}')
+            else:
+                new_columns.append(str(col).strip())
+        
+        df.columns = make_columns_unique(new_columns)
+        
+        # Try to detect date columns and format them
+        for col in df.columns:
+            try:
+                # Check if column contains dates
+                sample = df[col].dropna().head(5)
+                if len(sample) > 0:
+                    # Try to convert to datetime
+                    date_col = pd.to_datetime(sample, errors='coerce', infer_datetime_format=True)
+                    if not date_col.isna().all():
+                        # If more than 50% converted, apply to whole column
+                        if date_col.notna().sum() / len(sample) > 0.5:
+                            df[col] = pd.to_datetime(df[col], errors='coerce', infer_datetime_format=True)
+            except:
+                pass
+        
+        return df
+    except Exception as e:
+        return None
 
 def analyze_columns_for_patterns(df: pd.DataFrame) -> Dict[str, List[str]]:
     """Analyze columns for common patterns like debit, credit, etc."""
@@ -467,7 +469,7 @@ if st.session_state.pdf_uploaded:
         else:
             st.info(f"Will scan all {total_pages} pages")
     
-    # Advanced options - MODIFIED to remove exact row count requirement
+    # Advanced options
     with st.expander("⚙️ Table Detection Settings"):
         col1, col2 = st.columns(2)
         with col1:
@@ -482,9 +484,8 @@ if st.session_state.pdf_uploaded:
                 help="Minimum number of columns a table must have to be extracted"
             )
         with col2:
-            extract_text_tables = st.checkbox("Extract text-based tables", value=True)
-            merge_small_tables = st.checkbox("Merge adjacent small tables", value=True)
-            auto_detect_tables = st.checkbox("Auto-detect table boundaries", value=True)
+            detect_headers = st.checkbox("Auto-detect headers", value=True)
+            preserve_formatting = st.checkbox("Preserve number formatting", value=True)
     
     # Excel Formatting Options
     with st.expander("📊 Excel Data Type Options", expanded=False):
@@ -501,7 +502,7 @@ if st.session_state.pdf_uploaded:
             auto_detect = st.checkbox("Auto-detect data types", value=True,
                                      help="Automatically detect and convert appropriate data types")
     
-    # Extract button - MODIFIED to use min_rows instead of exact rows
+    # Extract button
     if selected_pages and st.button("🔍 Scan for Tables", type="primary", use_container_width=True):
         with st.spinner(f"Scanning {len(selected_pages)} pages for tables..."):
             # Save PDF temporarily
@@ -513,7 +514,7 @@ if st.session_state.pdf_uploaded:
                 # Extract tables
                 tables_by_page = extract_tables_with_pdfplumber(pdf_path, selected_pages)
                 
-                # Filter tables based on criteria (MINIMUM row count instead of EXACT)
+                # Filter tables based on criteria
                 filtered_tables = {}
                 total_tables_found = 0
                 tables_ignored = 0
@@ -521,7 +522,6 @@ if st.session_state.pdf_uploaded:
                 for page_num, tables in tables_by_page.items():
                     filtered_page_tables = []
                     for table in tables:
-                        # CHANGED: Use >= for minimum rows instead of == for exact match
                         if len(table) >= min_rows and len(table.columns) >= min_cols:
                             filtered_page_tables.append(table)
                             total_tables_found += 1
@@ -554,7 +554,7 @@ if st.session_state.pdf_uploaded:
                             "shape": f"{len(table)}x{len(table.columns)}"
                         }
                         
-                        # Initialize column selections (all selected by default) - only valid columns
+                        # Initialize column selections (all selected by default)
                         valid_columns = [col for col in table.columns if col is not None and not pd.isna(col)]
                         st.session_state.column_selections[table_id] = {
                             col: True for col in valid_columns
@@ -651,10 +651,10 @@ if st.session_state.tables_data:
                             # Analyze columns for patterns
                             column_analysis = analyze_columns_for_patterns(table)
                             
-                            # Create multi-select for columns - only valid columns
+                            # Create multi-select for columns
                             all_columns = [col for col in table.columns if col is not None and not pd.isna(col)]
                             
-                            # Default columns to select (based on analysis)
+                            # Default columns to select (all by default)
                             default_selected = []
                             for col in all_columns:
                                 if col in st.session_state.column_selections.get(table_id, {}):
@@ -664,7 +664,7 @@ if st.session_state.tables_data:
                             selected_columns = st.multiselect(
                                 f"Choose columns for Table {table_idx + 1}",
                                 options=all_columns,
-                                default=default_selected if default_selected else all_columns[:min(3, len(all_columns))],
+                                default=default_selected if default_selected else all_columns,
                                 key=f"cols_{table_id}",
                                 help="Select columns to include in export"
                             )
@@ -800,7 +800,7 @@ if st.session_state.tables_data:
             if table_info.get("selected", False):
                 df = table_info.get("df")
                 if df is not None:
-                    # Apply column selection - only valid columns
+                    # Apply column selection
                     selected_cols = [
                         col for col, is_selected in st.session_state.column_selections.get(table_id, {}).items()
                         if is_selected and col is not None and not pd.isna(col)
@@ -990,7 +990,6 @@ if st.session_state.tables_data:
                         excel_data = f.read()
                     
                     # Success message
-                    # Calculate average rows
                     avg_rows = total_rows // len(tables_to_export) if tables_to_export else 0
                     
                     st.markdown(f"""
