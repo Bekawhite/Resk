@@ -82,6 +82,20 @@ if 'row_selections' not in st.session_state:
 if 'all_columns' not in st.session_state:
     st.session_state.all_columns = {}
 
+def make_columns_unique(columns):
+    """Make column names unique by appending numbers if needed"""
+    seen = {}
+    unique_columns = []
+    for col in columns:
+        col_str = str(col)
+        if col_str in seen:
+            seen[col_str] += 1
+            unique_columns.append(f"{col_str}_{seen[col_str]}")
+        else:
+            seen[col_str] = 0
+            unique_columns.append(col_str)
+    return unique_columns
+
 def convert_to_proper_types(df: pd.DataFrame) -> pd.DataFrame:
     """Convert DataFrame columns to proper data types for Excel compatibility"""
     df_converted = df.copy()
@@ -215,14 +229,16 @@ def extract_tables_with_pdfplumber(pdf_path: str, pages: List[int]) -> Dict[int,
                                 df.columns = first_row
                                 df = df[1:].reset_index(drop=True)
                         
-                        # Rename columns if needed - handle None/NaN column names
+                        # Rename columns if needed - handle None/NaN column names and make unique
                         new_columns = []
                         for i, col in enumerate(df.columns):
                             if pd.isna(col) or str(col).strip() == '' or col is None:
                                 new_columns.append(f'Column_{i+1}')
                             else:
                                 new_columns.append(str(col).strip())
-                        df.columns = new_columns
+                        
+                        # Make column names unique
+                        df.columns = make_columns_unique(new_columns)
                         
                         # Only add if table has at least 1 row and 2 columns
                         if not df.empty and len(df) >= 1 and len(df.columns) >= 2:
@@ -262,14 +278,14 @@ def extract_tables_with_pdfplumber(pdf_path: str, pages: List[int]) -> Dict[int,
                                     df = df.replace('', pd.NA).dropna(how='all').reset_index(drop=True)
                                     df = df.dropna(axis=1, how='all')
                                     
-                                    # Rename columns
+                                    # Rename columns and make unique
                                     new_columns = []
                                     for i, col in enumerate(df.columns):
                                         if pd.isna(col) or str(col).strip() == '' or col is None:
                                             new_columns.append(f'Column_{i+1}')
                                         else:
                                             new_columns.append(str(col).strip())
-                                    df.columns = new_columns
+                                    df.columns = make_columns_unique(new_columns)
                                     
                                     if not df.empty and len(df) >= 1 and len(df.columns) >= 2:
                                         page_tables.append(df)
@@ -286,14 +302,14 @@ def extract_tables_with_pdfplumber(pdf_path: str, pages: List[int]) -> Dict[int,
                             df = df.replace('', pd.NA).dropna(how='all').reset_index(drop=True)
                             df = df.dropna(axis=1, how='all')
                             
-                            # Rename columns
+                            # Rename columns and make unique
                             new_columns = []
                             for i, col in enumerate(df.columns):
                                 if pd.isna(col) or str(col).strip() == '' or col is None:
                                     new_columns.append(f'Column_{i+1}')
                                 else:
                                     new_columns.append(str(col).strip())
-                            df.columns = new_columns
+                            df.columns = make_columns_unique(new_columns)
                             
                             if not df.empty and len(df) >= 1 and len(df.columns) >= 2:
                                 page_tables.append(df)
@@ -538,9 +554,10 @@ if st.session_state.pdf_uploaded:
                             "shape": f"{len(table)}x{len(table.columns)}"
                         }
                         
-                        # Initialize column selections (all selected by default)
+                        # Initialize column selections (all selected by default) - only valid columns
+                        valid_columns = [col for col in table.columns if col is not None and not pd.isna(col)]
                         st.session_state.column_selections[table_id] = {
-                            col: True for col in table.columns if col is not None and not pd.isna(col)
+                            col: True for col in valid_columns
                         }
                         
                         # Initialize row range selection
@@ -551,7 +568,7 @@ if st.session_state.pdf_uploaded:
                         }
                         
                         # Store all columns for analysis
-                        st.session_state.all_columns[table_id] = [col for col in table.columns if col is not None and not pd.isna(col)]
+                        st.session_state.all_columns[table_id] = valid_columns
                         
                         table_counter += 1
                 
@@ -634,7 +651,7 @@ if st.session_state.tables_data:
                             # Analyze columns for patterns
                             column_analysis = analyze_columns_for_patterns(table)
                             
-                            # Create multi-select for columns
+                            # Create multi-select for columns - only valid columns
                             all_columns = [col for col in table.columns if col is not None and not pd.isna(col)]
                             
                             # Default columns to select (based on analysis)
@@ -713,20 +730,32 @@ if st.session_state.tables_data:
                             # Preview section
                             with st.expander("👁️ Preview Selected Data", expanded=False):
                                 # Get filtered data based on selections
-                                if use_all_rows:
-                                    preview_df = table[selected_columns] if selected_columns else table
-                                else:
-                                    preview_df = table.iloc[start_row:end_row+1][selected_columns] if selected_columns else table.iloc[start_row:end_row+1]
-                                
-                                if not preview_df.empty:
-                                    st.dataframe(
-                                        preview_df.head(50),
-                                        use_container_width=True,
-                                        height=400
-                                    )
-                                    st.caption(f"Showing first 50 rows of {len(preview_df):,} total rows")
-                                else:
-                                    st.warning("No data to preview. Please select at least one column.")
+                                try:
+                                    if use_all_rows:
+                                        if selected_columns:
+                                            preview_df = table[selected_columns].copy()
+                                        else:
+                                            preview_df = table.copy()
+                                    else:
+                                        if selected_columns:
+                                            preview_df = table.iloc[start_row:end_row+1][selected_columns].copy()
+                                        else:
+                                            preview_df = table.iloc[start_row:end_row+1].copy()
+                                    
+                                    # Ensure column names are strings
+                                    preview_df.columns = [str(col) for col in preview_df.columns]
+                                    
+                                    if not preview_df.empty:
+                                        st.dataframe(
+                                            preview_df.head(50),
+                                            use_container_width=True,
+                                            height=400
+                                        )
+                                        st.caption(f"Showing first 50 rows of {len(preview_df):,} total rows")
+                                    else:
+                                        st.warning("No data to preview. Please select at least one column.")
+                                except Exception as e:
+                                    st.warning(f"Error previewing data: {e}")
                     
                     st.markdown("---")
     
@@ -771,68 +800,71 @@ if st.session_state.tables_data:
             if table_info.get("selected", False):
                 df = table_info.get("df")
                 if df is not None:
-                    # Apply column selection
+                    # Apply column selection - only valid columns
                     selected_cols = [
                         col for col, is_selected in st.session_state.column_selections.get(table_id, {}).items()
-                        if is_selected
+                        if is_selected and col is not None and not pd.isna(col)
                     ]
                     
                     if selected_cols:  # Only export if at least one column is selected
                         # Apply row selection
                         row_selection = st.session_state.row_selections.get(table_id, {})
                         
-                        if row_selection.get("all_rows", True):
-                            filtered_df = df[selected_cols].copy()
-                        else:
-                            start_row = row_selection.get("start_row", 0)
-                            end_row = row_selection.get("end_row", len(df) - 1)
-                            filtered_df = df.iloc[start_row:end_row+1][selected_cols].copy()
-                        
-                        # Apply data cleaning
-                        if remove_empty:
-                            filtered_df = filtered_df.replace(r'^\s*$', np.nan, regex=True)
-                            filtered_df = filtered_df.dropna(how='all')
-                        
-                        if remove_duplicates:
-                            filtered_df = filtered_df.drop_duplicates()
-                        
-                        # Rename columns if requested
-                        if rename_columns and not filtered_df.empty:
-                            column_analysis = analyze_columns_for_patterns(filtered_df)
-                            new_columns = []
-                            for col in filtered_df.columns:
-                                if col in column_analysis and column_analysis.get(col):
-                                    # Use first detected pattern
-                                    new_name = column_analysis[col][0].title()
-                                    # Add index if duplicate
-                                    if new_name in new_columns:
-                                        new_name = f"{new_name}_{new_columns.count(new_name) + 1}"
-                                    new_columns.append(new_name)
-                                else:
-                                    new_columns.append(str(col))
-                            filtered_df.columns = new_columns
-                        
-                        # Convert to proper data types for Excel
-                        if convert_numbers or convert_dates or auto_detect:
-                            filtered_df = convert_to_proper_types(filtered_df)
-                        
-                        if not filtered_df.empty:
-                            tables_to_export.append({
-                                "df": filtered_df,
-                                "page": table_info["page"],
-                                "table_idx": table_info["table_idx"],
-                                "original_shape": table_info["shape"],
-                                "filtered_shape": f"{len(filtered_df)}x{len(filtered_df.columns)}"
-                            })
+                        try:
+                            if row_selection.get("all_rows", True):
+                                filtered_df = df[selected_cols].copy()
+                            else:
+                                start_row = row_selection.get("start_row", 0)
+                                end_row = row_selection.get("end_row", len(df) - 1)
+                                filtered_df = df.iloc[start_row:end_row+1][selected_cols].copy()
                             
-                            export_summary.append({
-                                "Page": table_info["page"],
-                                "Table": table_info["table_idx"] + 1,
-                                "Original": table_info["shape"],
-                                "Exported": f"{len(filtered_df)}x{len(filtered_df.columns)}",
-                                "Columns": len(filtered_df.columns),
-                                "Rows": len(filtered_df)
-                            })
+                            # Apply data cleaning
+                            if remove_empty:
+                                filtered_df = filtered_df.replace(r'^\s*$', np.nan, regex=True)
+                                filtered_df = filtered_df.dropna(how='all')
+                            
+                            if remove_duplicates:
+                                filtered_df = filtered_df.drop_duplicates()
+                            
+                            # Rename columns if requested
+                            if rename_columns and not filtered_df.empty:
+                                column_analysis = analyze_columns_for_patterns(filtered_df)
+                                new_columns = []
+                                for col in filtered_df.columns:
+                                    if col in column_analysis and column_analysis.get(col):
+                                        # Use first detected pattern
+                                        new_name = column_analysis[col][0].title()
+                                        # Add index if duplicate
+                                        if new_name in new_columns:
+                                            new_name = f"{new_name}_{new_columns.count(new_name) + 1}"
+                                        new_columns.append(new_name)
+                                    else:
+                                        new_columns.append(str(col))
+                                filtered_df.columns = new_columns
+                            
+                            # Convert to proper data types for Excel
+                            if convert_numbers or convert_dates or auto_detect:
+                                filtered_df = convert_to_proper_types(filtered_df)
+                            
+                            if not filtered_df.empty:
+                                tables_to_export.append({
+                                    "df": filtered_df,
+                                    "page": table_info["page"],
+                                    "table_idx": table_info["table_idx"],
+                                    "original_shape": table_info["shape"],
+                                    "filtered_shape": f"{len(filtered_df)}x{len(filtered_df.columns)}"
+                                })
+                                
+                                export_summary.append({
+                                    "Page": table_info["page"],
+                                    "Table": table_info["table_idx"] + 1,
+                                    "Original": table_info["shape"],
+                                    "Exported": f"{len(filtered_df)}x{len(filtered_df.columns)}",
+                                    "Columns": len(filtered_df.columns),
+                                    "Rows": len(filtered_df)
+                                })
+                        except Exception as e:
+                            st.warning(f"Error processing table {table_id}: {e}")
         
         if not tables_to_export:
             st.warning("No data selected for export! Please select at least one column per table.")
