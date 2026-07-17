@@ -162,7 +162,7 @@ def is_table_like(data: List[List[str]]) -> bool:
     return len(data) >= 3 and len(data[0]) >= 2
 
 def extract_tables_with_pdfplumber(pdf_path: str, pages: List[int]) -> Dict[int, List[pd.DataFrame]]:
-    """Extract tables using pdfplumber only"""
+    """Extract tables using pdfplumber only - MODIFIED to better detect tables"""
     import pdfplumber
     from pdfplumber.table import TableSettings
     
@@ -172,8 +172,24 @@ def extract_tables_with_pdfplumber(pdf_path: str, pages: List[int]) -> Dict[int,
         for page_num in pages:
             page = pdf.pages[page_num - 1]
             
-            # Method 1: Use pdfplumber's table extraction
-            tables = page.extract_tables()
+            # Method 1: Use pdfplumber's table extraction with custom settings
+            table_settings = TableSettings(
+                vertical_strategy="text",
+                horizontal_strategy="text",
+                snap_tolerance=3,
+                snap_x_tolerance=3,
+                snap_y_tolerance=3,
+                join_tolerance=3,
+                join_x_tolerance=3,
+                join_y_tolerance=3,
+                edge_min_length=3,
+                min_words_vertical=1,
+                min_words_horizontal=1,
+                intersection_tolerance=3,
+                text_tolerance=3,
+            )
+            
+            tables = page.extract_tables(table_settings)
             page_tables = []
             
             for table_data in tables:
@@ -188,11 +204,11 @@ def extract_tables_with_pdfplumber(pdf_path: str, pages: List[int]) -> Dict[int,
                         # Remove empty columns
                         df = df.dropna(axis=1, how='all')
                         
-                        # Set first non-empty row as header if it looks like header
+                        # Check if first row might be header (contains text, not just numbers)
                         if len(df) > 1:
                             first_row = df.iloc[0].astype(str)
-                            # Check if first row might be header (contains text, not just numbers)
-                            if first_row.str.contains(r'[a-zA-Z]').any():
+                            # Check if first row might be header
+                            if first_row.str.contains(r'[a-zA-Z]').any() and not first_row.str.contains(r'^\d+$').all():
                                 df.columns = first_row
                                 df = df[1:].reset_index(drop=True)
                         
@@ -200,7 +216,8 @@ def extract_tables_with_pdfplumber(pdf_path: str, pages: List[int]) -> Dict[int,
                         df.columns = [f'Column_{i+1}' if pd.isna(col) or str(col).strip() == '' else str(col).strip() 
                                     for i, col in enumerate(df.columns)]
                         
-                        if not df.empty and len(df) > 0:
+                        # Only add if table has at least 2 rows and 2 columns
+                        if not df.empty and len(df) >= 1 and len(df.columns) >= 2:
                             page_tables.append(df)
                     except Exception as e:
                         st.warning(f"Error processing table on page {page_num}: {e}")
@@ -216,8 +233,12 @@ def extract_tables_with_pdfplumber(pdf_path: str, pages: List[int]) -> Dict[int,
                     current_table = []
                     
                     for line in lines:
-                        # Check if line has tabular pattern (multiple items separated by 2+ spaces)
-                        parts = [part.strip() for part in re.split(r'\s{2,}', line) if part.strip()]
+                        # Skip empty lines
+                        if not line.strip():
+                            continue
+                            
+                        # Check if line has tabular pattern (multiple items separated by 2+ spaces or tabs)
+                        parts = [part.strip() for part in re.split(r'\s{2,}|\t', line) if part.strip()]
                         
                         if len(parts) >= 2:
                             current_table.append(parts)
@@ -233,7 +254,7 @@ def extract_tables_with_pdfplumber(pdf_path: str, pages: List[int]) -> Dict[int,
                                     df = df.replace('', pd.NA).dropna(how='all').reset_index(drop=True)
                                     df = df.dropna(axis=1, how='all')
                                     
-                                    if not df.empty and len(df) >= 2:
+                                    if not df.empty and len(df) >= 1 and len(df.columns) >= 2:
                                         page_tables.append(df)
                                 except:
                                     pass
@@ -247,7 +268,7 @@ def extract_tables_with_pdfplumber(pdf_path: str, pages: List[int]) -> Dict[int,
                             df = pd.DataFrame(padded_table)
                             df = df.replace('', pd.NA).dropna(how='all').reset_index(drop=True)
                             df = df.dropna(axis=1, how='all')
-                            if not df.empty and len(df) >= 2:
+                            if not df.empty and len(df) >= 1 and len(df.columns) >= 2:
                                 page_tables.append(df)
                         except:
                             pass
@@ -389,25 +410,26 @@ if st.session_state.pdf_uploaded:
         else:
             st.info(f"Will scan all {total_pages} pages")
     
-    # Advanced options
+    # Advanced options - MODIFIED to remove exact row count requirement
     with st.expander("⚙️ Table Detection Settings"):
         col1, col2 = st.columns(2)
         with col1:
             min_rows = st.number_input(
-                "Exact number of rows per table", 
+                "Minimum rows per table", 
                 1, 1000000, 1,
-                help="Extract ONLY tables with exactly this many rows"
+                help="Extract tables with at least this many rows (set to 1 to include all tables)"
             )
             min_cols = st.number_input(
                 "Minimum columns per table", 
-                2, 50, 3,
+                2, 50, 2,
                 help="Minimum number of columns a table must have to be extracted"
             )
         with col2:
             extract_text_tables = st.checkbox("Extract text-based tables", value=True)
             merge_small_tables = st.checkbox("Merge adjacent small tables", value=True)
+            auto_detect_tables = st.checkbox("Auto-detect table boundaries", value=True)
     
-    # Excel Formatting Options (NEW)
+    # Excel Formatting Options
     with st.expander("📊 Excel Data Type Options", expanded=False):
         st.markdown("**Data Type Conversion for Excel Compatibility:**")
         col1, col2 = st.columns(2)
@@ -422,7 +444,7 @@ if st.session_state.pdf_uploaded:
             auto_detect = st.checkbox("Auto-detect data types", value=True,
                                      help="Automatically detect and convert appropriate data types")
     
-    # Extract button
+    # Extract button - MODIFIED to use min_rows instead of exact rows
     if selected_pages and st.button("🔍 Scan for Tables", type="primary", use_container_width=True):
         with st.spinner(f"Scanning {len(selected_pages)} pages for tables..."):
             # Save PDF temporarily
@@ -434,7 +456,7 @@ if st.session_state.pdf_uploaded:
                 # Extract tables
                 tables_by_page = extract_tables_with_pdfplumber(pdf_path, selected_pages)
                 
-                # Filter tables based on criteria (EXACT row count match)
+                # Filter tables based on criteria (MINIMUM row count instead of EXACT)
                 filtered_tables = {}
                 total_tables_found = 0
                 tables_ignored = 0
@@ -442,8 +464,8 @@ if st.session_state.pdf_uploaded:
                 for page_num, tables in tables_by_page.items():
                     filtered_page_tables = []
                     for table in tables:
-                        # MODIFIED: Changed from >= to == to get EXACT row count match
-                        if len(table) == min_rows and len(table.columns) >= min_cols:
+                        # CHANGED: Use >= for minimum rows instead of == for exact match
+                        if len(table) >= min_rows and len(table.columns) >= min_cols:
                             filtered_page_tables.append(table)
                             total_tables_found += 1
                         else:
@@ -493,12 +515,12 @@ if st.session_state.pdf_uploaded:
                         table_counter += 1
                 
                 if total_tables_found > 0:
-                    st.success(f"✅ Found {total_tables_found} tables with exactly {min_rows} rows across {len(filtered_tables)} pages")
+                    st.success(f"✅ Found {total_tables_found} tables with at least {min_rows} rows across {len(filtered_tables)} pages")
                     
                     if tables_ignored > 0:
-                        st.info(f"ℹ️ Ignored {tables_ignored} tables that did NOT have exactly {min_rows} rows")
+                        st.info(f"ℹ️ Ignored {tables_ignored} tables that had fewer than {min_rows} rows")
                 else:
-                    st.warning(f"⚠️ No tables found with exactly {min_rows} rows. Try a different row count or select more pages.")
+                    st.warning(f"⚠️ No tables found with at least {min_rows} rows. Try reducing the minimum row requirement or select more pages.")
                 
             except Exception as e:
                 st.error(f"Error extracting tables: {e}")
@@ -584,7 +606,7 @@ if st.session_state.tables_data:
                             selected_columns = st.multiselect(
                                 f"Choose columns for Table {table_idx + 1}",
                                 options=all_columns,
-                                default=default_selected,
+                                default=default_selected if default_selected else all_columns[:min(3, len(all_columns))],
                                 key=f"cols_{table_id}",
                                 help="Select columns to include in export"
                             )
@@ -749,7 +771,7 @@ if st.session_state.tables_data:
                                     new_columns.append(col)
                             filtered_df.columns = new_columns
                         
-                        # Convert to proper data types for Excel (NEW)
+                        # Convert to proper data types for Excel
                         if convert_numbers or convert_dates or auto_detect:
                             filtered_df = convert_to_proper_types(filtered_df)
                         
